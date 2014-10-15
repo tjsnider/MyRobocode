@@ -1,13 +1,15 @@
 package tjs.robot;
 
+import static robocode.util.Utils.normalRelativeAngle;
+import static robocode.util.Utils.normalRelativeAngleDegrees;
+
 import java.awt.Color;
-import java.awt.Graphics2D;
 
 import robocode.DeathEvent;
+import robocode.HitRobotEvent;
+import robocode.HitWallEvent;
 import robocode.Robot;
 import robocode.ScannedRobotEvent;
-import static robocode.util.Utils.normalRelativeAngleDegrees;
-import static robocode.util.Utils.normalRelativeAngle;
 
 /**
  * Robot to go sit in a corner and fire towards the thick of combat
@@ -19,9 +21,10 @@ import static robocode.util.Utils.normalRelativeAngle;
  */
 public class Sulker extends Robot {
 	int others; // Number of other robots in the game
+	private double maxX;
+	private double maxY;
 	static int corner = 0; // Which corner we are currently using
 	// static so that it keeps it between rounds.
-	boolean stopWhenSeeRobot = false; // See goCorner()
 
 	public void run() {
 		// 	Set colors
@@ -34,6 +37,10 @@ public class Sulker extends Robot {
 		// Save # of other bots
 		others = getOthers();
 
+		// get boundries
+		maxX = getBattleFieldWidth() - 18.0;
+		maxY = getBattleFieldHeight() - 18.0;
+		
 		// Move to a corner
 		goCorner();
 		
@@ -53,58 +60,61 @@ public class Sulker extends Robot {
 	}
 	
 	/**
-	 * goCorner:  A very inefficient way to get to a corner.  Can you do better?
+	 * goCorner:  modified to more reliably reach a corner
 	 */
 	public void goCorner() {
-		// We don't want to stop when we're just turning...
-		stopWhenSeeRobot = false;
 		// turn to face the wall to the "right" of our desired corner.
 		turnRight(normalRelativeAngleDegrees(corner - getHeading()));
-		// Ok, now we don't want to crash into any robot in our way...
-		stopWhenSeeRobot = true;
 		// Move to that wall
 		ahead(5000);
 		// Turn to face the corner
 		turnLeft(90);
 		// Move to the corner
 		ahead(5000);
-		// Turn gun to starting point
-		turnGunLeft(90);
+		// rotate radar
+		turnRadarLeft(90);
 	}
-
+	
 	/**
-	 * onScannedRobot:  Stop and fire!
+	 * onHitRobot
+	 * 
+	 * need to be able to resume moving toward a corner
+	 * 
 	 */
-	public void onScannedRobot(ScannedRobotEvent e) {
-		// Should we stop, or just fire?
-		if (stopWhenSeeRobot) {
-			// Stop everything!  You can safely call stop multiple times.
-			stop();
-			// Call our custom firing method
-			smartFire(e);
-			// Look for another robot.
-			// NOTE:  If you call scan() inside onScannedRobot, and it sees a robot,
-			// the game will interrupt the event handler and start it over
-			scan();
-			// We won't get here if we saw another robot.
-			// Okay, we didn't see another robot... start moving or turning again.
-			resume();
-		} else {
-			smartFire(e);
+	public void onHitRobot(HitRobotEvent e) {
+		// are we in a corner?
+		double xpos = getX();
+		double ypos = getY();
+		out.println("("+xpos+", "+ypos+")");
+		if (!(((xpos == maxX) || (xpos == 0.0)) && // left or right corner
+			  ((ypos == maxY) || (ypos == 0.0)))) {
+			out.println("Not in a corner; heading to corner "+corner);
+			goCorner();
 		}
 	}
+	
+	public void onHitWall(HitWallEvent e) {
+		double xpos = getX();
+		double ypos = getY();
+		out.println("("+xpos+", "+ypos+")");
+	}
 
 	/**
-	 * smartFire:  Custom fire method that determines firepower based on distance.
-	 *
-	 * @param robotDistance the distance to the robot to fire at
+	 * onScannedRobot
+	 * 
+	 * 1. check heat
+	 * 2. calculate shot power based in distance...weaker/faster for further targets
+	 * 3. determine an amount to lead target based on current velocity
+	 * 
+	 * @param ScannedRobotEvent e - event pertaining to robot scanned
 	 */
-	public void smartFire(ScannedRobotEvent robot) {
+	public void onScannedRobot(ScannedRobotEvent e) {
 		// No point if heat is > 0
 		if (getGunHeat() == 0) {
-			double robotDistance = robot.getDistance();
+			double robotDistance = e.getDistance();
 			double bullet = 1.0;
 			
+			// lower power moves faster and easier to reach distant targets
 			if (robotDistance > 200 || getEnergy() < 15) {
 				bullet = 1.0;
 			} else if (robotDistance > 50) {
@@ -114,10 +124,11 @@ public class Sulker extends Robot {
 			}
 			
 			// calculate rough linear prediction targeting
-			double absoluteBearing = toRadians(getHeading()) + robot.getBearingRadians();
-			double adjustment = (robot.getVelocity() * Math.sin(robot.getHeadingRadians() - absoluteBearing) / 13.0);
+			double absoluteBearing = toRadians(getHeading()) + e.getBearingRadians();
+			double adjustment = (e.getVelocity() * Math.sin(e.getHeadingRadians() - absoluteBearing) / 13.0);
 			turnGunRight(toDegrees(normalRelativeAngle(absoluteBearing - toRadians(getGunHeading()) + adjustment)));
 			
+			// kill
 			fire(bullet);
 		}
 	}
