@@ -1,11 +1,13 @@
 package tjs.robot;
 
 import java.awt.Color;
+import java.awt.Graphics2D;
 
 import robocode.DeathEvent;
 import robocode.Robot;
 import robocode.ScannedRobotEvent;
 import static robocode.util.Utils.normalRelativeAngleDegrees;
+import static robocode.util.Utils.normalRelativeAngle;
 
 /**
  * Robot to go sit in a corner and fire towards the thick of combat
@@ -34,21 +36,19 @@ public class Sulker extends Robot {
 
 		// Move to a corner
 		goCorner();
+		
+		// uncouple radar from gun
+		setAdjustRadarForGunTurn(true);
 
 		// Initialize gun turn speed to 3
-		int gunIncrement = 3;
+		int radarIncrement = 3;
 
-		// Calculate arc limits based on corner
-		double leftLimit = corner;
-		double rightLimit = corner + 90;
-		double limit = leftLimit;
-		// Spin gun back and forth
+		// Spin radar back and forth
 		while (true) {
-			while (getGunHeading() > limit) {
-				turnGunLeft(gunIncrement);
+			for (int i = 0; i < 30; i++) {
+				turnRadarLeft(radarIncrement);
 			}
-			gunIncrement *= -1;
-			limit = (limit == leftLimit) ? rightLimit : leftLimit;
+			radarIncrement *= -1;
 		}
 	}
 	
@@ -115,7 +115,8 @@ public class Sulker extends Robot {
 			
 			// calculate rough linear prediction targeting
 			double absoluteBearing = toRadians(getHeading()) + robot.getBearingRadians();
-			turnGunLeft(toDegrees(normalRelativeAngleDegrees(absoluteBearing - toRadians(getGunHeading()) + (robot.getVelocity() * Math.sin(robot.getHeadingRadians() - absoluteBearing) / 13.0))));
+			double adjustment = (robot.getVelocity() * Math.sin(robot.getHeadingRadians() - absoluteBearing) / 13.0);
+			turnGunRight(toDegrees(normalRelativeAngle(absoluteBearing - toRadians(getGunHeading()) + adjustment)));
 			
 			fire(bullet);
 		}
