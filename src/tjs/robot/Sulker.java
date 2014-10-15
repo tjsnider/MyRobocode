@@ -21,10 +21,12 @@ import robocode.ScannedRobotEvent;
  */
 public class Sulker extends Robot {
 	int others; // Number of other robots in the game
-	private double maxX;
-	private double maxY;
 	static int corner = 0; // Which corner we are currently using
 	// static so that it keeps it between rounds.
+	private double maxX; // right wall
+	private double maxY; // top wall
+	boolean isAtWall = false; // count wall collisions
+	boolean isInCorner = false; // note corner location
 
 	public void run() {
 		// 	Set colors
@@ -83,12 +85,7 @@ public class Sulker extends Robot {
 	 */
 	public void onHitRobot(HitRobotEvent e) {
 		// are we in a corner?
-		double xpos = getX();
-		double ypos = getY();
-		out.println("("+xpos+", "+ypos+")");
-		if (!(((xpos == maxX) || (xpos == 0.0)) && // left or right corner
-			  ((ypos == maxY) || (ypos == 0.0)))) {
-			out.println("Not in a corner; heading to corner "+corner);
+		if (!isInCorner) {
 			goCorner();
 		}
 	}
@@ -97,6 +94,18 @@ public class Sulker extends Robot {
 		double xpos = getX();
 		double ypos = getY();
 		out.println("("+xpos+", "+ypos+")");
+
+		if (!isInCorner) {
+			if (isAtWall) {
+				isInCorner = true;
+			} else {
+				isAtWall = true;
+				
+				// turn toward corner
+				double bearing = normalRelativeAngleDegrees(corner - getHeading());
+				turnLeft(bearing);
+			}
+		}
 	}
 
 	/**
