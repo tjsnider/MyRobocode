@@ -3,6 +3,7 @@ package tjs.robot;
 import static robocode.util.Utils.normalRelativeAngle;
 
 import java.awt.Color;
+import java.awt.Graphics2D;
 
 import robocode.HitRobotEvent;
 import robocode.HitWallEvent;
@@ -19,13 +20,17 @@ import robocode.ScannedRobotEvent;
  */
 public class Sulker extends Robot {
 	int others; // Number of other robots in the game
-	private double maxX; // right wall
-	private double maxY; // top wall
-	private double minX = 0.0; // left wall
-	private double minY = 0.0; // bottom wall
-	boolean isAtWall = false; // count wall collisions
-	boolean isInCorner = false; // note corner location
-	int radarIncrement = 360; // sweep field
+	private double maxX;			// right wall
+	private double maxY;			// top wall
+	private double minX = 0.0;		// left wall
+	private double minY = 0.0;		// bottom wall
+	private double startX = 0.0;	// starting X position
+	private double startY = 0.0;	// starting Y position
+	private double cornerX = 0.0;	// X position of targeted corner
+	private double cornerY = 0.0;	// Y position of targeted corner
+	boolean isAtWall = false;		// count wall collisions
+	boolean isInCorner = false;		// note corner location
+	int radarIncrement = 360;		// sweep field
 
 	public void run() {
 		// 	Set colors
@@ -60,11 +65,19 @@ public class Sulker extends Robot {
 	private void turnTowardNearestCorner(double x, double y) {
 		double nearX = maxX-x < x ? maxX-x : -x;
 		double nearY = maxY-y < y ? maxY-y : -y;
-		double newHeading = Math.atan(nearY/nearX);
+		double newHeading = Math.atan2(nearX, nearY);
 		
-		out.println("Heading toward ("+nearX+", "+nearY+") on bearing "+newHeading);
+		startX = x;
+		startY = y;
+		cornerX = nearX+x;
+		cornerY = nearY+y;
 		
-		turnRight(toDegrees(normalRelativeAngle(toRadians(newHeading-90) - toRadians(getHeading()))));
+		out.println("Starting position ("+x+", "+y+") on heading "+getHeading());
+		out.println("Heading toward ("+nearX+x+", "+nearY+y+") on bearing "+toDegrees(newHeading));
+		
+		turnRight(toDegrees(newHeading - toRadians(getHeading())));
+		
+		out.println("Current heading: "+getHeading());
 	}
 
 	/**
@@ -111,11 +124,6 @@ public class Sulker extends Robot {
 		}*/
 	} 
 
-	private void adjustRadarSweep() {
-		// TODO Auto-generated method stub
-		
-	}
-
 	/**
 	 * onScannedRobot
 	 * 
@@ -148,6 +156,16 @@ public class Sulker extends Robot {
 			// kill
 			fire(bullet);
 		}
+	}
+
+	public void onPaint(Graphics2D g) {
+		g.setColor(java.awt.Color.RED);
+		g.drawLine((int)startX, (int)startY, (int)cornerX, (int)cornerY);
+	}
+	
+	private void adjustRadarSweep() {
+		// TODO Auto-generated method stub
+		
 	}
 
 	/**
