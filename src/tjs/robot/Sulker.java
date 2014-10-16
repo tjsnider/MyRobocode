@@ -3,6 +3,7 @@ package tjs.robot;
 import static robocode.util.Utils.normalRelativeAngle;
 
 import java.awt.Color;
+import java.awt.Graphics2D;
 
 import robocode.HitRobotEvent;
 import robocode.HitWallEvent;
@@ -19,13 +20,17 @@ import robocode.ScannedRobotEvent;
  */
 public class Sulker extends Robot {
 	int others; // Number of other robots in the game
-	private double maxX; // right wall
-	private double maxY; // top wall
-	private double minX = 0.0; // left wall
-	private double minY = 0.0; // bottom wall
-	boolean isAtWall = false; // count wall collisions
-	boolean isInCorner = false; // note corner location
-	int radarIncrement = 360; // sweep field
+	private double maxX;			// right wall
+	private double maxY;			// top wall
+	private double minX = 0.0;		// left wall
+	private double minY = 0.0;		// bottom wall
+	private double startX = 0.0;	// starting X position
+	private double startY = 0.0;	// starting Y position
+	private double cornerX = 0.0;	// X position of targeted corner
+	private double cornerY = 0.0;	// Y position of targeted corner
+	boolean isAtWall = false;		// count wall collisions
+	boolean isInCorner = false;		// note corner location
+	int radarIncrement = 360;		// sweep field
 
 	public void run() {
 		// 	Set colors
@@ -42,6 +47,8 @@ public class Sulker extends Robot {
 		maxX = getBattleFieldWidth();
 		maxY = getBattleFieldHeight();
 		
+		// uncouple the gun from the body
+		setAdjustGunForRobotTurn(true);
 		// uncouple radar from gun
 		setAdjustRadarForGunTurn(true);
 
@@ -56,53 +63,21 @@ public class Sulker extends Robot {
 	}
 	
 	private void turnTowardNearestCorner(double x, double y) {
-		// recenter coordinate system on tank
-		double localMinX = -x;
-		double localMinY = -y;
-		double localMaxX = maxX + x;
-		double localMaxY = maxY + y;
+		double nearX = maxX-x < x ? maxX-x : -x;
+		double nearY = maxY-y < y ? maxY-y : -y;
+		double newHeading = Math.atan2(nearX, nearY);
 		
-		// calculate distances
-		double lowerLeftDstnc = Math.sqrt(localMinX*localMinX + localMinY*localMinY);
-		double upperLeftDstnc = Math.sqrt(localMinX*localMinX + localMaxY*localMaxY);
-		double upperRightDstnc = Math.sqrt(localMaxX*localMaxX + localMaxY*localMaxY);
-		double lowerRightDstnc = Math.sqrt(localMinX*localMinX + localMaxY*localMaxY);
+		startX = x;
+		startY = y;
+		cornerX = nearX+x;
+		cornerY = nearY+y;
 		
-		// find shortest and angle to shortest
-		double newHeading;
-		if (lowerLeftDstnc < upperLeftDstnc) {
-			if (lowerLeftDstnc < upperRightDstnc) {
-				if (lowerLeftDstnc < lowerRightDstnc) {
-					out.println("Heading to lower left.");
-					newHeading = Math.atan(localMinY/localMinX);
-				} else {
-					out.println("Heading to lower right.");
-					newHeading = Math.atan(localMaxY/localMinX);
-				}
-			} else if (upperRightDstnc < lowerRightDstnc) {
-				out.println("Heading to upper right.");
-				newHeading = Math.atan(localMaxY/localMaxX);
-			} else {
-				out.println("Heading to lower right.");
-				newHeading = Math.atan(localMaxY/localMinX);
-			}
-		} else if (upperLeftDstnc < upperRightDstnc) {
-			if (upperLeftDstnc < lowerRightDstnc) {
-				out.println("Heading to upper left.");
-				newHeading = Math.atan(localMaxY/localMinX);
-			} else {
-				out.println("Heading to lower right.");
-				newHeading = Math.atan(localMaxY/localMinX);
-			}
-		} else if (upperRightDstnc < lowerRightDstnc) {
-			out.println("Heading to upper right.");
-			newHeading = Math.atan(localMaxY/localMaxX);
-		} else {
-			out.println("Heading to lower right.");
-			newHeading = Math.atan(localMaxY/localMinX);
-		}
+		out.println("Starting position ("+x+", "+y+") on heading "+getHeading());
+		out.println("Heading toward ("+nearX+x+", "+nearY+y+") on bearing "+toDegrees(newHeading));
 		
-		turnRight(normalRelativeAngle(newHeading - getHeading()));
+		turnRight(toDegrees(newHeading - toRadians(getHeading())));
+		
+		out.println("Current heading: "+getHeading());
 	}
 
 	/**
@@ -112,7 +87,7 @@ public class Sulker extends Robot {
 	 * 
 	 */
 	public void onHitRobot(HitRobotEvent e) {
-		out.println("Oh no! I've hit a robot.");
+		out.println("Oh no! I've hit a robot. ("+getX()+", "+getY()+")");
 		// are we in a corner?
 		if (!isInCorner) {
 			// If he's in front of us, set back up a bit.
@@ -124,12 +99,13 @@ public class Sulker extends Robot {
 		}
 	}
 	
-/*	public void onHitWall(HitWallEvent e) {
+	public void onHitWall(HitWallEvent e) {
 		double xpos = getX();
 		double ypos = getY();
-		out.println("("+xpos+", "+ypos+")");
+		double heading = getHeading();
+		out.println("I've hit a wall. ("+xpos+", "+ypos+","+heading+")");
 
-		if (!isInCorner) {
+		/*if (!isInCorner) {
 			if (isAtWall) {
 				out.println("I'm in a corner.");
 				isInCorner = true;
@@ -145,13 +121,8 @@ public class Sulker extends Robot {
 				// move
 				ahead(5000);
 			}
-		}
-	} */
-
-	private void adjustRadarSweep() {
-		// TODO Auto-generated method stub
-		
-	}
+		}*/
+	} 
 
 	/**
 	 * onScannedRobot
@@ -185,6 +156,16 @@ public class Sulker extends Robot {
 			// kill
 			fire(bullet);
 		}
+	}
+
+	public void onPaint(Graphics2D g) {
+		g.setColor(java.awt.Color.RED);
+		g.drawLine((int)startX, (int)startY, (int)cornerX, (int)cornerY);
+	}
+	
+	private void adjustRadarSweep() {
+		// TODO Auto-generated method stub
+		
 	}
 
 	/**
