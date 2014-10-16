@@ -1,6 +1,7 @@
 package tjs.robot;
 
 import static robocode.util.Utils.normalRelativeAngle;
+import static robocode.util.Utils.normalRelativeAngleDegrees;
 
 import java.awt.Color;
 import java.awt.Graphics2D;
@@ -8,6 +9,7 @@ import java.awt.Graphics2D;
 import robocode.HitRobotEvent;
 import robocode.HitWallEvent;
 import robocode.Robot;
+import robocode.RobotDeathEvent;
 import robocode.ScannedRobotEvent;
 
 /**
@@ -20,66 +22,54 @@ import robocode.ScannedRobotEvent;
  */
 public class Sulker extends Robot {
 	int others; // Number of other robots in the game
-	private double maxX;			// right wall
-	private double maxY;			// top wall
-	private double minX = 0.0;		// left wall
-	private double minY = 0.0;		// bottom wall
-	private double startX = 0.0;	// starting X position
-	private double startY = 0.0;	// starting Y position
-	private double cornerX = 0.0;	// X position of targeted corner
-	private double cornerY = 0.0;	// Y position of targeted corner
+	double[][] corners;				//  Set corners array {X,Y, left corner, right corner}
+									//  array coordinates offset for width of bot
+	double[] targetCorner = {18.0, 18.0, 1.0, 3.0};
 	boolean isAtWall = false;		// count wall collisions
 	boolean isInCorner = false;		// note corner location
-	int radarIncrement = 360;		// sweep field
+	double radarIncrement = 360;		// sweep field
+	boolean unlimberGun = false;
 
 	public void run() {
+		double[][] setCorners = {{18.0, 18.0, 1.0, 3.0},
+								 {18.0, getBattleFieldHeight()-18.0, 2.0, 0.0},
+								 {getBattleFieldWidth()-18.0, getBattleFieldHeight()-18.0, 3.0, 1.0},
+								 {getBattleFieldWidth()-18.0, 18.0, 0.0, 3.0}};
+		corners = setCorners;
+		
 		// 	Set colors
 		setBodyColor(Color.black);
-		setGunColor(Color.red);
-		setRadarColor(Color.white);
-		setBulletColor(Color.black);
+		setGunColor(Color.white);
+		setRadarColor(Color.red);
+		setBulletColor(Color.red);
 		setScanColor(Color.white);
 
 		// Save # of other bots
 		others = getOthers();
 
-		// get boundries
-		maxX = getBattleFieldWidth();
-		maxY = getBattleFieldHeight();
+		layCourse(plotNearestCorner(getX(), getY()));
 		
 		// uncouple the gun from the body
+		unlimberGun = true;
 		setAdjustGunForRobotTurn(true);
 		// uncouple radar from gun
 		setAdjustRadarForGunTurn(true);
 
-		turnTowardNearestCorner(getX(), getY());
-		ahead(5000);
-		
 		// Spin radar back and forth
+		int direction = 1;
+		double x = getX();
+		double y = getY();
+		// sets initial position and returns sweep angle
+		radarIncrement = adjustRadarSweep(x, y);
 		while (true) {
-			turnRadarLeft(radarIncrement);
-			radarIncrement *= -1;
+			out.println("Current radar heading: "+getRadarHeading());
+			out.println("turning "+(direction*radarIncrement)+" degrees.");
+			turnRadarRight(direction * radarIncrement);
+			out.println("changing direction of radar sweep.");
+			direction *= -1;
 		}
 	}
 	
-	private void turnTowardNearestCorner(double x, double y) {
-		double nearX = maxX-x < x ? maxX-x : -x;
-		double nearY = maxY-y < y ? maxY-y : -y;
-		double newHeading = Math.atan2(nearX, nearY);
-		
-		startX = x;
-		startY = y;
-		cornerX = nearX+x;
-		cornerY = nearY+y;
-		
-		out.println("Starting position ("+x+", "+y+") on heading "+getHeading());
-		out.println("Heading toward ("+nearX+x+", "+nearY+y+") on bearing "+toDegrees(newHeading));
-		
-		turnRight(toDegrees(newHeading - toRadians(getHeading())));
-		
-		out.println("Current heading: "+getHeading());
-	}
-
 	/**
 	 * onHitRobot
 	 * 
@@ -88,41 +78,27 @@ public class Sulker extends Robot {
 	 */
 	public void onHitRobot(HitRobotEvent e) {
 		out.println("Oh no! I've hit a robot. ("+getX()+", "+getY()+")");
-		// are we in a corner?
-		if (!isInCorner) {
-			// If he's in front of us, set back up a bit.
-			if (e.getBearing() > -90 && e.getBearing() < 90) {
-				back(100);
-			} else {
-				ahead(100);
-			}
+		// If he's in front of us, set back up a bit.
+		if (e.getBearing() > -90 && e.getBearing() < 90) {
+			back(100);
+		} else {
+			ahead(100);
 		}
+		
+		// if the robot is idle, go around
+		layCourse(plotNextCorner(getX(), getY()));
 	}
 	
 	public void onHitWall(HitWallEvent e) {
-		double xpos = getX();
-		double ypos = getY();
-		double heading = getHeading();
-		out.println("I've hit a wall. ("+xpos+", "+ypos+","+heading+")");
-
-		/*if (!isInCorner) {
-			if (isAtWall) {
-				out.println("I'm in a corner.");
-				isInCorner = true;
-				
-				adjustRadarSweep();
-			} else {
-				out.println("I've hit a wall.");
-				isAtWall = true;
-				
-				adjustRadarSweep();
-				// turn toward corner
-				
-				// move
-				ahead(5000);
-			}
-		}*/
+		out.println("I've hit a wall.");
 	} 
+	
+	/**
+	 * onRobotDeath: update other robot count variable for strategic adjustments
+	 */
+	public void onRobotDeath(RobotDeathEvent e) {
+		others = getOthers();
+	}
 
 	/**
 	 * onScannedRobot
@@ -148,10 +124,12 @@ public class Sulker extends Robot {
 				bullet = Math.min(3, getEnergy());
 			}
 			
-			// calculate rough linear prediction targeting
-			double absoluteBearing = toRadians(getHeading()) + e.getBearingRadians();
-			double adjustment = (e.getVelocity() * Math.sin(e.getHeadingRadians() - absoluteBearing) / 13.0);
-			turnGunRight(toDegrees(normalRelativeAngle(absoluteBearing - toRadians(getGunHeading()) + adjustment)));
+			if (unlimberGun) {
+				// calculate rough linear prediction targeting
+				double absoluteBearing = toRadians(getHeading()) + e.getBearingRadians();
+				double adjustment = (e.getVelocity() * Math.sin(e.getHeadingRadians() - absoluteBearing) / 13.0);
+				turnGunRight(toDegrees(normalRelativeAngle(absoluteBearing - toRadians(getGunHeading()) + adjustment)));
+			}
 			
 			// kill
 			fire(bullet);
@@ -159,15 +137,85 @@ public class Sulker extends Robot {
 	}
 
 	public void onPaint(Graphics2D g) {
-		g.setColor(java.awt.Color.RED);
-		g.drawLine((int)startX, (int)startY, (int)cornerX, (int)cornerY);
+		//g.draw(new Arc2D.Double(arg0, arg1, arg2, arg3, arg4, arg5, arg6));
 	}
 	
-	private void adjustRadarSweep() {
-		// TODO Auto-generated method stub
-		
+	private void layCourse(double[] destination) {
+		turnRight(destination[0]);
+		ahead(destination[1]);
 	}
 
+	/**
+	 * plotNearestCorner(double, double): calculates nearest corner from passed-in location
+	 * 
+	 * SIDE EFFECT: sets targetCorner array
+	 * 
+	 * @param x
+	 * @param y
+	 * @return double array of polar coordinates for course (angle, distance)
+	 */
+	private double[] plotNearestCorner(double x, double y) {
+		double shortest = 999999;
+		double current;
+		for (int i = 0; i < 4; i++) {
+			current = Math.sqrt((corners[i][0]-x)*(corners[i][0]-x) + (corners[i][1]-y)*(corners[i][1]-y));
+			if (current < shortest) {
+				shortest = current;
+				targetCorner = corners[i];
+			}
+		}
+		double newHeading = Math.atan2(targetCorner[0]-x,targetCorner[1]-y);
+		double[] plot = {toDegrees(newHeading - toRadians(getHeading())), shortest};
+		
+		return plot;
+	}
+
+	/**
+	 * plotNextCorner(double, double): calculates direction and distance of 
+	 * next corner in corners array from the passed-in location
+	 * 
+	 * SIDE EFFECT: sets targetCorner array
+	 * 
+	 * @param x
+	 * @param y
+	 * @return double array of polar coordinates for course (angle, distance)
+	 */
+	private double[] plotNextCorner(double x, double y) {
+		double[] nextCorner = corners[(int)targetCorner[2]];
+		double[] plot = {toDegrees(Math.atan2(nextCorner[0]-x, nextCorner[1]-y)),
+						 Math.sqrt((nextCorner[0]-x)*(nextCorner[0]-x)+(nextCorner[1]-y)*(nextCorner[1]-y))};
+		return plot;
+	}
+
+	private void turnRadarToHeading(double bearing) {
+		turnRadarLeft(normalRelativeAngleDegrees(bearing-getRadarHeading()));
+	}
+
+	private double plotRightCornerBearing(double x, double y) {
+		double[] rightCorner = corners[(int)targetCorner[3]];
+		double cornerBearing = toDegrees(Math.atan2(rightCorner[0]-x, rightCorner[1]-y));
+		return cornerBearing;
+	}
+
+	private double plotLeftCornerBearing(double x, double y) {
+		double[] leftCorner = corners[(int)targetCorner[2]];
+		double cornerBearing = toDegrees(Math.atan2(leftCorner[0]-x, leftCorner[1]-y));
+		return cornerBearing;
+	}
+	
+	private double adjustRadarSweep(double x, double y) {
+		double leftLimit = plotLeftCornerBearing(x, y);
+		out.println("Left corner bearing: "+leftLimit);
+		double rightLimit = plotRightCornerBearing(x, y);
+		out.println("Right corner bearing: "+rightLimit);
+		out.println("Current radar heading: "+getRadarHeading());
+		
+		turnRadarToHeading(leftLimit);
+		out.println("Current radar heading: "+getRadarHeading());
+		
+		return normalRelativeAngleDegrees(rightLimit - getRadarHeading());
+	}
+	
 	/**
 	 * since this is a basic bot, I can only get bearing, etc., in degrees, 
 	 * but my algorithms all seem to use radians.
