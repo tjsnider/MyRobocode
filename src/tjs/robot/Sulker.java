@@ -1,11 +1,9 @@
 package tjs.robot;
 
 import static robocode.util.Utils.normalRelativeAngle;
-import static robocode.util.Utils.normalRelativeAngleDegrees;
 
 import java.awt.Color;
 
-import robocode.DeathEvent;
 import robocode.HitRobotEvent;
 import robocode.HitWallEvent;
 import robocode.Robot;
@@ -21,12 +19,13 @@ import robocode.ScannedRobotEvent;
  */
 public class Sulker extends Robot {
 	int others; // Number of other robots in the game
-	static int corner = 0; // Which corner we are currently using
-	// static so that it keeps it between rounds.
 	private double maxX; // right wall
 	private double maxY; // top wall
+	private double minX = 0.0; // left wall
+	private double minY = 0.0; // bottom wall
 	boolean isAtWall = false; // count wall collisions
 	boolean isInCorner = false; // note corner location
+	int radarIncrement = 360; // sweep field
 
 	public void run() {
 		// 	Set colors
@@ -40,43 +39,72 @@ public class Sulker extends Robot {
 		others = getOthers();
 
 		// get boundries
-		maxX = getBattleFieldWidth() - 18.0;
-		maxY = getBattleFieldHeight() - 18.0;
-		
-		// Move to a corner
-		goCorner();
+		maxX = getBattleFieldWidth();
+		maxY = getBattleFieldHeight();
 		
 		// uncouple radar from gun
 		setAdjustRadarForGunTurn(true);
 
-		// Initialize gun turn speed to 3
-		int radarIncrement = 3;
-
+		turnTowardNearestCorner(getX(), getY());
+		ahead(5000);
+		
 		// Spin radar back and forth
 		while (true) {
-			for (int i = 0; i < 30; i++) {
-				turnRadarLeft(radarIncrement);
-			}
+			turnRadarLeft(radarIncrement);
 			radarIncrement *= -1;
 		}
 	}
 	
-	/**
-	 * goCorner:  modified to more reliably reach a corner
-	 */
-	public void goCorner() {
-		// turn to face the wall to the "right" of our desired corner.
-		turnRight(normalRelativeAngleDegrees(corner - getHeading()));
-		// Move to that wall
-		ahead(5000);
-		// Turn to face the corner
-		turnLeft(90);
-		// Move to the corner
-		ahead(5000);
-		// rotate radar
-		turnRadarLeft(90);
+	private void turnTowardNearestCorner(double x, double y) {
+		// recenter coordinate system on tank
+		double localMinX = -x;
+		double localMinY = -y;
+		double localMaxX = maxX + x;
+		double localMaxY = maxY + y;
+		
+		// calculate distances
+		double lowerLeftDstnc = Math.sqrt(localMinX*localMinX + localMinY*localMinY);
+		double upperLeftDstnc = Math.sqrt(localMinX*localMinX + localMaxY*localMaxY);
+		double upperRightDstnc = Math.sqrt(localMaxX*localMaxX + localMaxY*localMaxY);
+		double lowerRightDstnc = Math.sqrt(localMinX*localMinX + localMaxY*localMaxY);
+		
+		// find shortest and angle to shortest
+		double newHeading;
+		if (lowerLeftDstnc < upperLeftDstnc) {
+			if (lowerLeftDstnc < upperRightDstnc) {
+				if (lowerLeftDstnc < lowerRightDstnc) {
+					out.println("Heading to lower left.");
+					newHeading = Math.atan(localMinY/localMinX);
+				} else {
+					out.println("Heading to lower right.");
+					newHeading = Math.atan(localMaxY/localMinX);
+				}
+			} else if (upperRightDstnc < lowerRightDstnc) {
+				out.println("Heading to upper right.");
+				newHeading = Math.atan(localMaxY/localMaxX);
+			} else {
+				out.println("Heading to lower right.");
+				newHeading = Math.atan(localMaxY/localMinX);
+			}
+		} else if (upperLeftDstnc < upperRightDstnc) {
+			if (upperLeftDstnc < lowerRightDstnc) {
+				out.println("Heading to upper left.");
+				newHeading = Math.atan(localMaxY/localMinX);
+			} else {
+				out.println("Heading to lower right.");
+				newHeading = Math.atan(localMaxY/localMinX);
+			}
+		} else if (upperRightDstnc < lowerRightDstnc) {
+			out.println("Heading to upper right.");
+			newHeading = Math.atan(localMaxY/localMaxX);
+		} else {
+			out.println("Heading to lower right.");
+			newHeading = Math.atan(localMaxY/localMinX);
+		}
+		
+		turnRight(normalRelativeAngle(newHeading - getHeading()));
 	}
-	
+
 	/**
 	 * onHitRobot
 	 * 
@@ -84,28 +112,45 @@ public class Sulker extends Robot {
 	 * 
 	 */
 	public void onHitRobot(HitRobotEvent e) {
+		out.println("Oh no! I've hit a robot.");
 		// are we in a corner?
 		if (!isInCorner) {
-			goCorner();
+			// If he's in front of us, set back up a bit.
+			if (e.getBearing() > -90 && e.getBearing() < 90) {
+				back(100);
+			} else {
+				ahead(100);
+			}
 		}
 	}
 	
-	public void onHitWall(HitWallEvent e) {
+/*	public void onHitWall(HitWallEvent e) {
 		double xpos = getX();
 		double ypos = getY();
 		out.println("("+xpos+", "+ypos+")");
 
 		if (!isInCorner) {
 			if (isAtWall) {
+				out.println("I'm in a corner.");
 				isInCorner = true;
+				
+				adjustRadarSweep();
 			} else {
+				out.println("I've hit a wall.");
 				isAtWall = true;
 				
+				adjustRadarSweep();
 				// turn toward corner
-				double bearing = normalRelativeAngleDegrees(corner - getHeading());
-				turnLeft(bearing);
+				
+				// move
+				ahead(5000);
 			}
 		}
+	} */
+
+	private void adjustRadarSweep() {
+		// TODO Auto-generated method stub
+		
 	}
 
 	/**
@@ -142,27 +187,6 @@ public class Sulker extends Robot {
 		}
 	}
 
-	/**
-	 * onDeath:  We died.  Decide whether to try a different corner next game.
-	 */
-	public void onDeath(DeathEvent e) {
-		// Well, others should never be 0, but better safe than sorry.
-		if (others == 0) {
-			return;
-		}
-
-		// If 75% of the robots are still alive when we die, we'll switch corners.
-		if ((others - getOthers()) / (double) others < .75) {
-			corner += 90;
-			if (corner == 270) {
-				corner = -90;
-			}
-			out.println("I died and did poorly... switching corner to " + corner);
-		} else {
-			out.println("I died but did well.  I will still use corner " + corner);
-		}
-	}
-	
 	/**
 	 * since this is a basic bot, I can only get bearing, etc., in degrees, 
 	 * but my algorithms all seem to use radians.
