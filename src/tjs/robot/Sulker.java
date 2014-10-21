@@ -243,7 +243,7 @@ public class Sulker extends Robot {
 		if (e.getEnergy() == 0) {
 			scan.put("score", 1000.0);
 		} else {
-			double score = -(timeToTarget + adjustment + 3*(robotVelocity/Rules.getBulletSpeed(bullet)) + 
+			double score = -(timeToTarget + adjustment + (robotVelocity/Rules.getBulletSpeed(bullet)) + 
 							Math.abs(normalRelativeAngle(angle - toRadians(getGunHeading()))));
 			scan.put("score", score);
 		}
