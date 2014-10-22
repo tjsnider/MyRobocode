@@ -25,6 +25,7 @@ import robocode.RoundEndedEvent;
 import robocode.Rules;
 import robocode.ScannedRobotEvent;
 import robocode.StatusEvent;
+import robocode.WinEvent;
 
 /**
  * Robot to go sit in a corner and fire towards the thick of combat
@@ -53,6 +54,7 @@ public class Sulker extends Robot {
 
 	// list of movement strategies utilized by move() function
 	List<Consumer<Point2D.Double>> movementStrategies = Arrays.asList(
+		// 0
 		p -> {
 			double[] corner = targetCorner;	
 			double[] course = plotNextCorner(p); // side-effect changes current corner
@@ -61,18 +63,21 @@ public class Sulker extends Robot {
 			layCourse(course);
 			turnRight(135);
 			sweep = adjustRadarSweep(getX(), getY());
-			moveState = 5;
+			moveState = 4;
 		},	
+		// 1
 		p -> { 
 			layCourse(plotNearestCorner(p)); 
 			sweep = adjustRadarSweep(p);
 			moveState = 0;
 		},
+		// 2
 		p -> { 
 			layCourse(plotNextCorner(p));  
 			sweep = adjustRadarSweep(p);
 			moveState = 0;
 		},
+		// 3
 		p -> {
 			if (Math.random() > 0.5) {
 				layCourse(plotNextCorner(p));
@@ -80,22 +85,23 @@ public class Sulker extends Robot {
 				layCourse(plotNearestCorner(p));
 			}
 			sweep = adjustRadarSweep(p);
-			moveState = 4;
+			moveState = 0;
 		},
-		p -> { 
-			narrowBattleField();
-			layCourse(plotNearestCorner(p));
-			moveState = 1;
-		},
+		// 4
 		p -> { 
 			ahead(142); 
 			sweep = adjustRadarSweep(getX(), getY());
-			moveState = 6; 
+			moveState = 5; 
 		},
+		// 5
 		p -> { 
 			back(142); 
 			sweep = adjustRadarSweep(getX(), getY());
-			moveState = 5; 
+			moveState = 4; 
+		},
+		// 6 -- duelling state
+		p -> {
+			
 		}
 	);
 	// current movement strategy
@@ -279,6 +285,15 @@ public class Sulker extends Robot {
 		}
 	}
 
+	/**
+	 * Stolen directly from TrackFire bot
+	 * 
+	 */
+	public void onWin(WinEvent e) {
+		// Victory dance
+		turnRight(36000);
+	}
+
 	public void onPaint(Graphics2D g) {
 		double x = getX();
 		double y = getY();
@@ -374,12 +389,11 @@ public class Sulker extends Robot {
 		// add scan to list of scanned robots
 		scanned.put(e.getName(), scan);
 		
-		out.println("Added scanned robot: "+scan);
+		//out.println("Added scanned robot: "+scan);
 	}
 	
 	private void circularPrediction(ScannedRobotEvent e) {
 		out.println("Scanned robot targeting with circular prediction.");
-		
 	}
 	
 	/**
