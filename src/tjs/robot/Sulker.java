@@ -5,10 +5,13 @@ import static robocode.util.Utils.normalRelativeAngleDegrees;
 
 import java.awt.Color;
 import java.awt.Graphics2D;
+import java.awt.geom.Point2D;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import robocode.BulletHitBulletEvent;
 import robocode.BulletHitEvent;
@@ -21,6 +24,7 @@ import robocode.RobotDeathEvent;
 import robocode.RoundEndedEvent;
 import robocode.Rules;
 import robocode.ScannedRobotEvent;
+import robocode.StatusEvent;
 
 /**
  * Robot to go sit in a corner and fire towards the thick of combat
@@ -31,47 +35,99 @@ import robocode.ScannedRobotEvent;
  *
  */
 public class Sulker extends Robot {
-	interface MatchBearing {
-		double setHeading(double bearing);
-	}
-	
-	MatchBearing gun = bearing -> { 
-		//out.print("Lambda: turn gun to match absolute heading: ");
-		//out.print(bearing);
-		//out.print(" from heading ");
-		//out.println(getGunHeading());
-		double newBearing = normalRelativeAngleDegrees(bearing - getGunHeading()); 
-		turnGunRight(newBearing) ;
-		return newBearing;
+	double[][] corners;	//  Set corners array {X,Y, left corner, right corner}
+						//  array coordinates offset for width of bot
+	double[] targetCorner = {18.0, 18.0, 1.0, 3.0};	// currently operation corner
+	double[] sweep;	// Sets boundaries of radar sweep	
+
+	// Since I'm always turning something to match a given bearing and all that varies is what...
+	Consumer<Double> gun = bearing -> { 
+		turnGunRight(normalRelativeAngleDegrees(bearing - getGunHeading())) ;
 	};
-	MatchBearing body = bearing -> { 
-		//out.print("Lambda: turn body to match absolute heading: ");
-		//out.print(bearing);
-		//out.print(" from heading ");
-		//out.println(getHeading());
-		double newBearing = normalRelativeAngleDegrees(bearing - getHeading()); 
-		turnRight(newBearing) ;
-		return newBearing;
+	Consumer<Double> body = bearing -> { 
+		turnRight(normalRelativeAngleDegrees(bearing - getHeading())) ;
 	};
-	MatchBearing radar = bearing -> {
-		//out.print("Lambda: turn radar to match absolute heading: ");
-		//out.print(bearing);
-		//out.print(" from heading ");
-		//out.println(getRadarHeading());
-		double newBearing = normalRelativeAngleDegrees(bearing - getRadarHeading()); 
-		turnRadarRight(newBearing) ;
-		return newBearing;
+	Consumer<Double> radar = bearing -> {
+		turnRadarRight(normalRelativeAngleDegrees(bearing - getRadarHeading())) ;
 	};
+
+	// list of movement strategies utilized by move() function
+	List<Consumer<Point2D.Double>> movementStrategies = Arrays.asList(
+		p -> {
+			double[] corner = targetCorner;	
+			double[] course = plotNextCorner(p); // side-effect changes current corner
+			targetCorner = corner; // reset current corner
+			course[1] = 100.0;
+			layCourse(course);
+			turnRight(135);
+			sweep = adjustRadarSweep(getX(), getY());
+			moveState = 5;
+		},	
+		p -> { 
+			layCourse(plotNearestCorner(p)); 
+			sweep = adjustRadarSweep(p);
+			moveState = 0;
+		},
+		p -> { 
+			layCourse(plotNextCorner(p));  
+			sweep = adjustRadarSweep(p);
+			moveState = 0;
+		},
+		p -> {
+			if (Math.random() > 0.5) {
+				layCourse(plotNextCorner(p));
+			} else {
+				layCourse(plotNearestCorner(p));
+			}
+			sweep = adjustRadarSweep(p);
+			moveState = 4;
+		},
+		p -> { 
+			narrowBattleField();
+			layCourse(plotNearestCorner(p));
+			moveState = 1;
+		},
+		p -> { 
+			ahead(142); 
+			sweep = adjustRadarSweep(getX(), getY());
+			moveState = 6; 
+		},
+		p -> { 
+			back(142); 
+			sweep = adjustRadarSweep(getX(), getY());
+			moveState = 5; 
+		}
+	);
+	// current movement strategy
+	int moveState = 1;
+	// list of radar sweep strategies
+	List<Consumer<Point2D.Double>> radarStrategies = Arrays.asList(
+			p -> { turnRadarRight(360); },
+			p -> {
+				turnToHeading(toDegrees(Math.atan2(corners[(int)targetCorner[2]][0]-p.getX(), 
+						   						   corners[(int)targetCorner[2]][1]-p.getY())), radar);
+				radarState = 2;
+			},
+			p -> {
+				turnToHeading(toDegrees(Math.atan2(corners[(int)targetCorner[3]][0]-p.getX(), 
+						   						   corners[(int)targetCorner[3]][1]-p.getY())), radar);
+				radarState = 1;
+			}
+	);
+	// current radar strategy
+	int radarState = 1;
+	// list of targeting strategies
+	List<Consumer<ScannedRobotEvent>> targetingStrategies = Arrays.asList(
+			// weighted linear prediction
+			e -> { linearPrediction(e); },
+			e -> { circularPrediction(e); }
+	);
+	// current targeting strategy
+	int targetingState = 0;
 	
 	int others; // Number of other robots in the game
 	Map<String, Map<String, Number>> scanned;	// contains vital statistics of potential targets
 	Map<String, Number> identity;	// identity map for parallel stream reduce methods
-	
-	double[][] corners;	//  Set corners array {X,Y, left corner, right corner}
-						//  array coordinates offset for width of bot
-	double[] targetCorner = {18.0, 18.0, 1.0, 3.0};	// currently operation corner
-	
-	double[] sweep;	// Sets boundaries of radar sweep	
 	
 	Map<String, Integer> stats;
 	
@@ -104,26 +160,41 @@ public class Sulker extends Robot {
 		identity = new HashMap<String, Number>(1);
 		identity.put("score", new Double(-50000.0));
 
-		layCourse(plotNearestCorner(getX(), getY()));
-		
 		// uncouple the gun from the body
 		setAdjustGunForRobotTurn(true);
 		// uncouple radar from gun
 		setAdjustRadarForGunTurn(true);
-
-		// Spin radar back and forth
-		int direction = 0;
-		double x = getX();
-		double y = getY();
-		// sets initial position and returns sweep angle
-		sweep = adjustRadarSweep(x, y);
+		
 		while (true) {
-			turnToHeading(sweep[direction], radar);
-			direction = (direction == 1) ? 0 : 1;
-			smartFire();
+			double x = getX();
+			double y = getY();
+			sweep(x,y);
+			shoot();
+			move(x,y);
 		}
 	}
 	
+	/**
+	 * onStatus: called every turn to provide a snapshot of data to the robot
+	 */
+	public void onStatus(StatusEvent e) {
+	}
+	
+	private void shoot() {
+		//out.println("Shooting. Strategy: "+targetingState);
+		smartFire();
+	}
+
+	private void sweep(double x, double y) {
+		//out.println("Sweeping. Strategy: "+radarState);
+		radarStrategies.get(radarState).accept(new Point2D.Double(x, y));
+	}
+
+	private void move(double x, double y) {
+		//out.println("Moving. Strategy: "+moveState);
+		movementStrategies.get(moveState).accept(new Point2D.Double(x, y));
+	}
+
 	/**
 	 * onHitRobot
 	 * 
@@ -133,10 +204,10 @@ public class Sulker extends Robot {
 	public void onHitRobot(HitRobotEvent e) {
 		//out.println("Oh no! I've hit a robot. ("+getX()+", "+getY()+")");
 		// If he's in front of us, set back up a bit.
-		if (e.getBearing() > -90 && e.getBearing() < 90) {
+		double bearing = e.getBearing();
+		if (bearing > -90 && bearing < 90) {
 			// target and fire
-			if (getGunHeat() == 0) {
-				turnToHeading(e.getBearing(), gun);
+			if (getGunHeat() == 0 && Math.abs(bearing) < 30) {
 				fire(3);
 				stats.put("shots", stats.get("shots")+1);
 			}
@@ -144,28 +215,19 @@ public class Sulker extends Robot {
 			back(100);
 		} else {
 			// target and fire
-			if (getGunHeat() == 0) {
-				turnToHeading(e.getBearing(), gun);
+			if (getGunHeat() == 0 && Math.abs(bearing) < 30) {
 				fire(3);
 				stats.put("shots", stats.get("shots")+1);
 			}
 			
 			ahead(100);
 		}
-		
-		double x = getX();
-		double y = getY();
-		// resume movement
-		if (Math.random() > 0.5) {
-			layCourse(plotNextCorner(x, y));
-		} else {
-			layCourse(plotNearestCorner(x, y));
-		}
-		sweep = adjustRadarSweep(x, y);
+
+		moveState = 3;
 	}
 	
 	public void onHitWall(HitWallEvent e) {
-		out.println("I've hit a wall.");
+		//out.println("I've hit a wall.");
 		sweep = adjustRadarSweep(getX(), getY());
 	} 
 	
@@ -187,6 +249,67 @@ public class Sulker extends Robot {
 	 * @param ScannedRobotEvent e - event pertaining to robot scanned
 	 */
 	public void onScannedRobot(ScannedRobotEvent e) {
+		//out.println("Scanned a robot.");
+		targetingStrategies.get(targetingState).accept(e);
+	}
+	
+	public void onBulletHit(BulletHitEvent e) {
+		stats.put("hits", stats.get("hits")+1);
+	}
+	
+	public void onBulletMissed(BulletMissedEvent e) {
+		stats.put("misses", stats.get("misses")+1);
+	}
+	
+	public void onBulletHitBullet(BulletHitBulletEvent e) {
+		stats.put("bullets", stats.get("bullets")+1);
+	}
+	
+	public void onDeath(DeathEvent e) {
+		out.println("Statistics -- "+stats);
+		if (stats.get("shots") != 0) {
+			out.println("Accuracy: "+stats.get("hits")*100/stats.get("shots"));
+		}
+	}
+	
+	public void onRoundEnded(RoundEndedEvent e) {
+		out.println("Statistics -- "+stats);
+		if (stats.get("shots") != 0) {
+			out.println("Accuracy: "+stats.get("hits")*100/stats.get("shots"));
+		}
+	}
+
+	public void onPaint(Graphics2D g) {
+		double x = getX();
+		double y = getY();
+		//out.println("Painting.");
+		// point to the corners
+		if (getVelocity() != 0) {
+			g.setColor(Color.white);
+			g.drawLine((int)x, (int)y, (int)corners[0][0], (int)corners[0][1]);
+			g.drawLine((int)x, (int)y, (int)corners[1][0], (int)corners[1][1]);
+			g.drawLine((int)x, (int)y, (int)corners[2][0], (int)corners[2][1]);
+			g.drawLine((int)x, (int)y, (int)corners[3][0], (int)corners[3][1]);
+		}
+
+		// 
+		g.setColor(Color.green);
+		scanned.entrySet().stream()
+			.filter(r -> (getTime() - r.getValue().get("time").longValue()) < 5)
+			.forEach(
+					r -> g.drawLine((int)x, 
+								    (int)y, 
+							        ((Integer)r.getValue().get("x")).intValue(), 
+							        ((Integer)r.getValue().get("y")).intValue()));
+	}
+	
+	/**
+	 * linearPrediction: uses weighted linear prediction to predict movement and weight targets
+	 * 
+	 * @param e - ScannedRobotEvent
+	 */
+	private void linearPrediction(ScannedRobotEvent e) {
+		//out.println("Scanned robot targeting with linear prediction.");
 		double robotDistance = e.getDistance();
 		double robotVelocity = e.getVelocity();
 		double bullet = 1.0;
@@ -251,52 +374,12 @@ public class Sulker extends Robot {
 		// add scan to list of scanned robots
 		scanned.put(e.getName(), scan);
 		
-		//out.println("Added scanned robot: "+scan);
+		out.println("Added scanned robot: "+scan);
 	}
 	
-	public void onBulletHit(BulletHitEvent e) {
-		stats.put("hits", stats.get("hits")+1);
-	}
-	
-	public void onBulletMissed(BulletMissedEvent e) {
-		stats.put("misses", stats.get("misses")+1);
-	}
-	
-	public void onBulletHitBullet(BulletHitBulletEvent e) {
-		stats.put("bullets", stats.get("bullets")+1);
-	}
-	
-	public void onDeath(DeathEvent e) {
-		out.println("Statistics -- "+stats);
-		out.println("Accuracy: "+stats.get("hits")*100/stats.get("shots"));
-	}
-	
-	public void onRoundEnded(RoundEndedEvent e) {
-		out.println("Statistics -- "+stats);
-		out.println("Accuracy: "+stats.get("hits")*100/stats.get("shots"));
-	}
-
-	public void onPaint(Graphics2D g) {
-		double x = getX();
-		double y = getY();
-		// point to the corners
-		if (getVelocity() != 0) {
-			g.setColor(Color.white);
-			g.drawLine((int)x, (int)y, (int)corners[0][0], (int)corners[0][1]);
-			g.drawLine((int)x, (int)y, (int)corners[1][0], (int)corners[1][1]);
-			g.drawLine((int)x, (int)y, (int)corners[2][0], (int)corners[2][1]);
-			g.drawLine((int)x, (int)y, (int)corners[3][0], (int)corners[3][1]);
-		}
-
-		// 
-		g.setColor(Color.green);
-		scanned.entrySet().stream()
-			.filter(r -> (getTime() - r.getValue().get("time").longValue()) < 5)
-			.forEach(
-					r -> g.drawLine((int)x, 
-								    (int)y, 
-							        ((Integer)r.getValue().get("x")).intValue(), 
-							        ((Integer)r.getValue().get("y")).intValue()));
+	private void circularPrediction(ScannedRobotEvent e) {
+		out.println("Scanned robot targeting with circular prediction.");
+		
 	}
 	
 	/**
@@ -304,7 +387,7 @@ public class Sulker extends Robot {
 	 * 
 	 */
 	private void smartFire() {
-		// abort if heat is > 0
+		// abort if heat is > 0, no energy or no scanned robots yet
 		if (getEnergy() > 0 && getGunHeat() == 0 && scanned.size() > 0) {
 			List<Map<String, Number>> victims = new ArrayList<Map<String, Number>>(scanned.keySet().size());
 			scanned.entrySet().stream()
@@ -323,15 +406,16 @@ public class Sulker extends Robot {
 				stats.put("shots", stats.get("shots")+1);
 				out.println("Firing: "+victim);
 			} else {
-				double x = getX();
-				double y = getY();
-				// move to a better position
-				if (Math.random() > 0.5) {
-					layCourse(plotNearestCorner(x, y));
-				}
-				sweep = adjustRadarSweep(x, y);
+				moveState = 4;
 			}
 		}
+	}
+	
+	/**
+	 * narrowBattleField: quarter the field by reassigning all the corners
+	 * 
+	 */
+	private void narrowBattleField() {
 	}
 	
 	/**
@@ -344,6 +428,10 @@ public class Sulker extends Robot {
 		ahead(destination[1]);
 	}
 
+	private double[] plotNearestCorner(Point2D.Double p) {
+			return plotNearestCorner(p.getX(), p.getY());
+	}
+	
 	/**
 	 * plotNearestCorner(double, double): calculates nearest corner from passed-in location
 	 * 
@@ -366,6 +454,10 @@ public class Sulker extends Robot {
 		return plotCorner(targetCorner[0]-x, targetCorner[1]-y);
 	}
 
+	private double[] plotNextCorner(Point2D.Double p) {
+		return plotNextCorner(p.getX(), p.getY());
+	}
+	
 	/**
 	 * plotNextCorner(double, double): calculates direction and distance of 
 	 * next corner in corners array from the passed-in location
@@ -386,6 +478,10 @@ public class Sulker extends Robot {
 		return plot;
 	}
 
+	private double[] adjustRadarSweep(Point2D.Double p) {
+		return adjustRadarSweep(p.getX(), p.getY());
+	}
+	
 	private double[] adjustRadarSweep(double x, double y) {
 		double [] bearings = {toDegrees(Math.atan2(corners[(int)targetCorner[2]][0]-x, 
 												   corners[(int)targetCorner[2]][1]-y)), 
@@ -399,8 +495,8 @@ public class Sulker extends Robot {
 	 * @param theta - bearing to match
 	 * @param operator - body part (body, gun, radar) to turn
 	 */
-	private double turnToHeading(double theta, MatchBearing operator) {
-		return operator.setHeading(theta);
+	private void turnToHeading(double theta, Consumer<Double> operator) {
+		operator.accept(theta);
 	}
 
 	/**
