@@ -333,6 +333,10 @@ public class Sulker extends Robot {
 		if (!(history.containsKey(name))) {
 			List<Map<String, Number>> empty = new LinkedList<Map<String, Number>>(); 
 			history.put(name, empty);
+		} else {
+			if (enemy.get("energy").doubleValue() != history.get(name).get(history.get(name).size()-1).get("energy").doubleValue()) {
+				moveToggle = 0 - moveToggle;
+			}
 		}
 		history.get(name).add(enemy);
 
@@ -343,15 +347,10 @@ public class Sulker extends Robot {
 		double percentage = amtcrawling * 100 / history.get(name).size();
 		boolean wallcrawler = percentage > 70;
 		if (wallcrawler) {
-			out.println(name+" is a wallcrawler ("+percentage+")");
 			targetingStrategies.get(0).accept(enemy);
 		} else {
-			out.println(name+" is not a wallcrawler ("+percentage+")");
 			targetingStrategies.get(1).accept(enemy);
 		}
-		out.println(name+" heading = "+enemy.get("heading").doubleValue());
-		out.println(name+" heading is square? "+enemy.get("wallcrawling").intValue());
-		out.println(name+" velocity = "+enemy.get("velocity").doubleValue());
 	}
 	
 	public void onBulletHit(BulletHitEvent e) {
