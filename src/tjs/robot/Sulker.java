@@ -1,16 +1,19 @@
 package tjs.robot;
 
-import static robocode.util.Utils.normalRelativeAngle;
 import static robocode.util.Utils.normalRelativeAngleDegrees;
 
 import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.geom.Point2D;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.function.Consumer;
 
 import robocode.BulletHitBulletEvent;
@@ -39,7 +42,10 @@ public class Sulker extends Robot {
 	double[][] corners;	//  Set corners array {X,Y, left corner, right corner}
 						//  array coordinates offset for width of bot
 	double[] targetCorner = {18.0, 18.0, 1.0, 3.0};	// currently operation corner
-	double[] sweep;	// Sets boundaries of radar sweep	
+	double[] sweep = {180.0, -180.0};	// Sets boundaries of radar sweep	
+	int others; // Number of other robots in the game
+	Map<String, Number> enemy;
+	Map<String, List<Map<String, Number>>> history = new HashMap<String, List<Map<String, Number>>>();
 
 	// Since I'm always turning something to match a given bearing and all that varies is what...
 	Consumer<Double> gun = bearing -> { 
@@ -52,29 +58,36 @@ public class Sulker extends Robot {
 		turnRadarRight(normalRelativeAngleDegrees(bearing - getRadarHeading())) ;
 	};
 
+	int moveToggle = 1; // allow to flip back and forth
 	// list of movement strategies utilized by move() function
 	List<Consumer<Point2D.Double>> movementStrategies = Arrays.asList(
 		// 0
 		p -> {
-			double[] corner = targetCorner;	
-			double[] course = plotNextCorner(p); // side-effect changes current corner
-			targetCorner = corner; // reset current corner
-			course[1] = 100.0;
-			layCourse(course);
-			turnRight(135);
-			sweep = adjustRadarSweep(getX(), getY());
-			moveState = 4;
+			double x = getX();
+			double y = getY();
+			if ((x < 19 || x > 980) && (y < 19 || y > 980)) { 
+				double[] corner = targetCorner;	
+				double[] course = plotNextCorner(x, y); // side-effect changes current corner
+				targetCorner = corner; // reset current corner
+				course[1] = 100.0;
+				layCourse(course);
+				turnRight(135);
+				moveState = 4;
+			} else {
+				moveState = 1;
+			}
+			sweep = adjustRadarSweep(x, y);
 		},	
 		// 1
 		p -> { 
 			layCourse(plotNearestCorner(p)); 
-			sweep = adjustRadarSweep(p);
+			sweep = adjustRadarSweep(getX(), getY());
 			moveState = 0;
 		},
 		// 2
 		p -> { 
 			layCourse(plotNextCorner(p));  
-			sweep = adjustRadarSweep(p);
+			sweep = adjustRadarSweep(getX(), getY());
 			moveState = 0;
 		},
 		// 3
@@ -84,7 +97,7 @@ public class Sulker extends Robot {
 			} else {
 				layCourse(plotNearestCorner(p));
 			}
-			sweep = adjustRadarSweep(p);
+			sweep = adjustRadarSweep(getX(), getY());
 			moveState = 0;
 		},
 		// 4
@@ -101,14 +114,25 @@ public class Sulker extends Robot {
 		},
 		// 6 -- duelling state
 		p -> {
-			
+			if (enemy != null) {
+				double bearing = enemy.get("originalBearing").doubleValue();
+				if (enemy.get("distance").doubleValue() > 200) {
+					turnRight(bearing + 90 - ( 15 * moveToggle));
+				} else {
+					turnRight(bearing + 90);
+				}
+				ahead(150 * moveToggle);
+				sweep[0] = bearing + 90;
+				sweep[1] = bearing - 90;
+			}
 		}
 	);
 	// current movement strategy
 	int moveState = 1;
+	private boolean found;
 	// list of radar sweep strategies
 	List<Consumer<Point2D.Double>> radarStrategies = Arrays.asList(
-			p -> { turnRadarRight(360); },
+			p -> { found = false; while (!found ) {turnRadarRight(45);} },
 			p -> {
 				turnToHeading(toDegrees(Math.atan2(corners[(int)targetCorner[2]][0]-p.getX(), 
 						   						   corners[(int)targetCorner[2]][1]-p.getY())), radar);
@@ -118,20 +142,25 @@ public class Sulker extends Robot {
 				turnToHeading(toDegrees(Math.atan2(corners[(int)targetCorner[3]][0]-p.getX(), 
 						   						   corners[(int)targetCorner[3]][1]-p.getY())), radar);
 				radarState = 1;
+			},
+			p -> {
+				turnToHeading(enemy.get("originalBearing").doubleValue()+90, radar);
+				radarState = 4;
+			},
+			p -> {
+				turnToHeading(enemy.get("originalBearing").doubleValue()-90, radar);
+				radarState = 3;
 			}
 	);
 	// current radar strategy
 	int radarState = 1;
 	// list of targeting strategies
-	List<Consumer<ScannedRobotEvent>> targetingStrategies = Arrays.asList(
+	List<Consumer<Map<String, Number>>> targetingStrategies = Arrays.asList(
 			// weighted linear prediction
 			e -> { linearPrediction(e); },
-			e -> { circularPrediction(e); }
+			e -> { gaussianDistributionPrediction(e); }
 	);
-	// current targeting strategy
-	int targetingState = 0;
 	
-	int others; // Number of other robots in the game
 	Map<String, Map<String, Number>> scanned;	// contains vital statistics of potential targets
 	Map<String, Number> identity;	// identity map for parallel stream reduce methods
 	
@@ -197,6 +226,10 @@ public class Sulker extends Robot {
 	}
 
 	private void move(double x, double y) {
+		if (others == 1) {	// Begin the duel!
+			moveState = 6;
+			radarState = 0;
+		}
 		//out.println("Moving. Strategy: "+moveState);
 		movementStrategies.get(moveState).accept(new Point2D.Double(x, y));
 	}
@@ -229,12 +262,19 @@ public class Sulker extends Robot {
 			ahead(100);
 		}
 
-		moveState = 3;
+		if (moveState != 6) { moveState = 3; }
 	}
 	
 	public void onHitWall(HitWallEvent e) {
 		//out.println("I've hit a wall.");
-		sweep = adjustRadarSweep(getX(), getY());
+		double x = getX();
+		if ((moveState == 4 || moveState== 5) && (x < 100.0 || x > 900.0)) { 
+			moveState = 2; 
+		} else if (moveState != 6) {
+			moveState = 2;
+		} else {
+			moveToggle = 0 - moveToggle;
+		}
 	} 
 	
 	/**
@@ -243,6 +283,11 @@ public class Sulker extends Robot {
 	public void onRobotDeath(RobotDeathEvent e) {
 		others = getOthers();
 		scanned.remove(e.getName());
+		if (others == 1) {	// Begin the duel!
+			moveState = 6;
+			radarState = 0;
+		}
+		out.println(e.getName()+" died.  "+others+" remain.");
 	}
 
 	/**
@@ -256,7 +301,56 @@ public class Sulker extends Robot {
 	 */
 	public void onScannedRobot(ScannedRobotEvent e) {
 		//out.println("Scanned a robot.");
-		targetingStrategies.get(targetingState).accept(e);
+		found = true;
+		enemy = new HashMap<String, Number>();
+		enemy.put("time", getTime());
+		enemy.put("distance", e.getDistance());
+		enemy.put("originalBearing", e.getBearing());
+		enemy.put("absoluteBearingRadians", toRadians(getHeading()) + e.getBearingRadians());
+		enemy.put("velocity", e.getVelocity());
+		enemy.put("heading", e.getHeading());
+		enemy.put("headingRadians", e.getHeadingRadians());
+		enemy.put("energy", e.getEnergy());
+		// lower power moves faster and easier to reach distant targets
+		double bullet = 1.0;
+		double energy = getEnergy();
+		if (enemy.get("distance").doubleValue() > 200 || energy < 15) {
+			bullet = 1.0;
+		} else if (enemy.get("distance").doubleValue() > 50) {
+			bullet = 2 < energy ? 2 : energy;
+		} else {
+			bullet = 3 < energy ? 3 : energy;
+		}
+		enemy.put("power", bullet);
+		enemy.put("wallcrawling", enemy.get("velocity").doubleValue() != 0.0 && (enemy.get("heading").doubleValue() == 0.0 || 
+				enemy.get("heading").doubleValue() == 90.0 || enemy.get("heading").doubleValue() == 180.0 ||
+				enemy.get("heading").doubleValue() == 270.0) ? 1 : 0);
+		// add scan to list of scanned robots
+		String name = e.getName();
+		scanned.put(name, enemy);
+
+		// add scan to history of that enemy's scans
+		if (!(history.containsKey(name))) {
+			List<Map<String, Number>> empty = new LinkedList<Map<String, Number>>(); 
+			history.put(name, empty);
+		} else {
+			if (enemy.get("energy").doubleValue() != history.get(name).get(history.get(name).size()-1).get("energy").doubleValue()) {
+				moveToggle = 0 - moveToggle;
+			}
+		}
+		history.get(name).add(enemy);
+
+		// analyze history for wall-crawling behavior -- easier to hit with simple linear prediction
+		long amtcrawling = history.get(name).stream()
+				.filter(r -> r.get("wallcrawling").intValue() == 1)
+				.count();
+		double percentage = amtcrawling * 100 / history.get(name).size();
+		boolean wallcrawler = percentage > 70;
+		if (wallcrawler) {
+			targetingStrategies.get(0).accept(enemy);
+		} else {
+			targetingStrategies.get(1).accept(enemy);
+		}
 	}
 	
 	public void onBulletHit(BulletHitEvent e) {
@@ -299,13 +393,13 @@ public class Sulker extends Robot {
 		double y = getY();
 		//out.println("Painting.");
 		// point to the corners
-		if (getVelocity() != 0) {
+		/*if (getVelocity() != 0) {
 			g.setColor(Color.white);
 			g.drawLine((int)x, (int)y, (int)corners[0][0], (int)corners[0][1]);
 			g.drawLine((int)x, (int)y, (int)corners[1][0], (int)corners[1][1]);
 			g.drawLine((int)x, (int)y, (int)corners[2][0], (int)corners[2][1]);
 			g.drawLine((int)x, (int)y, (int)corners[3][0], (int)corners[3][1]);
-		}
+		}*/
 
 		// 
 		g.setColor(Color.green);
@@ -323,77 +417,67 @@ public class Sulker extends Robot {
 	 * 
 	 * @param e - ScannedRobotEvent
 	 */
-	private void linearPrediction(ScannedRobotEvent e) {
-		//out.println("Scanned robot targeting with linear prediction.");
-		double robotDistance = e.getDistance();
-		double robotVelocity = e.getVelocity();
-		double bullet = 1.0;
-		double energy = getEnergy();
-		double gunHeading = getHeading();
-		double absoluteBearing = toRadians(gunHeading) + e.getBearingRadians();
+	private void linearPrediction(Map<String, Number> e) {
 		double x = getX();
 		double y = getY();
-		double targx;
-		double targy;
-		Map<String, Number> scan;
-		
-		// did we scan this guy before?
-		if (scanned.containsKey(e.getName())) {
-			scan = scanned.get(e.getName());
-		} else {
-			scan = new HashMap<String, Number>();
-		}
-		
-		scan.put("time", getTime());
-		// lower power moves faster and easier to reach distant targets
-		if (robotDistance > 200 || energy < 15) {
-			bullet = 1.0;
-		} else if (robotDistance > 50) {
-			bullet = 2 < energy ? 2 : energy;
-		} else {
-			bullet = 3 < energy ? 3 : energy;
-		}
-		scan.put("power", new Double(bullet));
-		scan.put("distance", robotDistance);
+		double robotDistance = e.get("distance").doubleValue();
+		double robotVelocity = e.get("velocity").doubleValue();
+		double bullet = e.get("power").doubleValue();
+		double absoluteBearing = e.get("absoluteBearingRadians").doubleValue();
 		
 		// calculate rough linear prediction targeting
 		double timeToTarget = Rules.getBulletSpeed(bullet);
-		double adjustment = Math.asin((robotVelocity * Math.sin(e.getHeadingRadians() - absoluteBearing) / timeToTarget));
+		double adjustment = Math.asin((robotVelocity * Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing) / timeToTarget));
 		// check for walls
-		targx = x + Math.sin(absoluteBearing + adjustment) * robotDistance;
-		if (targx < 18.0) { 
-			targx = 18.0; 
-		} else if (targx > (getBattleFieldWidth() - 18.0)) {
-			targx = getBattleFieldWidth() - 18.0;
-		}
-		targy = y + Math.cos(absoluteBearing + adjustment) * robotDistance;
-		if (targy < 18.0) { 
-			targy = 18.0; 
-		} else if (targy > (getBattleFieldHeight() - 18.0)) {
-			targy = getBattleFieldHeight() - 18.0;
-		}
-		double angle = toDegrees(Math.atan2(targx-x, targy-y));
-		scan.put("bearing", new Double(angle));
-		scan.put("x", new Integer((int)targx));
-		scan.put("y", new Integer((int)targy));
+		Point2D targPoint = checkWallCollision(new Point2D.Double(x,y), absoluteBearing + adjustment, robotDistance);
+		double angle = toDegrees(Math.atan2(targPoint.getX()-x, targPoint.getY()-y));
+		enemy.put("bearing", angle);
+		enemy.put("adjustment", adjustment);
+		enemy.put("x", new Integer((int)targPoint.getX()));
+		enemy.put("y", new Integer((int)targPoint.getY()));
 		
-		// weight distance and bearing for score
-		if (e.getEnergy() == 0) {
-			scan.put("score", 1000.0);
+		if (enemy.get("energy").doubleValue() == 0.0) {
+			enemy.put("score", 1000.0);
 		} else {
-			double score = -(timeToTarget + adjustment + (robotVelocity/Rules.getBulletSpeed(bullet)) + 
-							Math.abs(normalRelativeAngle(angle - toRadians(getGunHeading()))));
-			scan.put("score", score);
+			enemy.put("score",  -(adjustment + angle/30 + robotDistance));
 		}
-		
-		// add scan to list of scanned robots
-		scanned.put(e.getName(), scan);
-		
 		//out.println("Added scanned robot: "+scan);
 	}
 	
-	private void circularPrediction(ScannedRobotEvent e) {
-		out.println("Scanned robot targeting with circular prediction.");
+	/**
+	 * gaussianDistributionPrediction: linear prediction as above, but adjusted to factor in
+	 * 		random guessing with a gaussian distribution of probability
+	 * @param e
+	 */
+	private void gaussianDistributionPrediction(Map<String, Number> e) {
+		double x = getX();
+		double y = getY();
+		double robotDistance = e.get("distance").doubleValue();
+		double robotVelocity = e.get("velocity").doubleValue();
+		double bullet = e.get("power").doubleValue();
+		double absoluteBearing =  e.get("absoluteBearingRadians").doubleValue();
+		Random guess = new Random(Instant.now().toEpochMilli()); 
+		double secondGuess = guess.nextGaussian() / 2;
+		
+		// calculate rough linear prediction targeting
+		double timeToTarget = Rules.getBulletSpeed(bullet);
+		double adjustment = Math.asin((robotVelocity * Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing) / timeToTarget));
+		adjustment = adjustment * secondGuess;
+		// check for walls
+		Point2D targPoint = checkWallCollision(new Point2D.Double(x,y), absoluteBearing + adjustment, robotDistance);
+		double angle = toDegrees(Math.atan2(targPoint.getX()-x, targPoint.getY()-y));
+		enemy.put("bearing", angle);
+		enemy.put("adjustment", adjustment);
+		enemy.put("x", new Integer((int)targPoint.getX()));
+		enemy.put("y", new Integer((int)targPoint.getY()));
+		
+		
+		if (enemy.get("energy").doubleValue() == 0.0) {
+			enemy.put("score", 1000.0);
+		} else {
+			enemy.put("score",  -(adjustment + angle/30 + robotDistance));
+		}
+		//out.println("Added scanned robot: "+scan);
 	}
 	
 	/**
@@ -405,7 +489,7 @@ public class Sulker extends Robot {
 		if (getEnergy() > 0 && getGunHeat() == 0 && scanned.size() > 0) {
 			List<Map<String, Number>> victims = new ArrayList<Map<String, Number>>(scanned.keySet().size());
 			scanned.entrySet().stream()
-				.filter(r -> (getTime() - r.getValue().get("time").longValue()) < 5)
+				.filter(r -> (getTime() - r.getValue().get("time").longValue()) < 10)
 				.forEach(r -> victims.add(r.getValue()));
 			if (victims.size() > 0) {
 				Map<String, Number> victim = victims.stream()
@@ -418,18 +502,27 @@ public class Sulker extends Robot {
 				// kill
 				fire(victim.get("power").doubleValue());
 				stats.put("shots", stats.get("shots")+1);
-				out.println("Firing: "+victim);
+				//out.println("Firing: "+victim);
 			} else {
-				moveState = 4;
+				if (moveState != 6) { moveState = 2; }
 			}
 		}
 	}
 	
-	/**
-	 * narrowBattleField: quarter the field by reassigning all the corners
-	 * 
-	 */
-	private void narrowBattleField() {
+	private Point2D checkWallCollision(Point2D.Double origin, double bearing, double distance) {
+		double targx = origin.getX() + Math.sin(bearing) * distance;
+		if (targx < 18.0) { 
+			targx = 18.0; 
+		} else if (targx > (getBattleFieldWidth() - 18.0)) {
+			targx = getBattleFieldWidth() - 18.0;
+		}
+		double targy = origin.getY() + Math.cos(bearing) * distance;
+		if (targy < 18.0) { 
+			targy = 18.0; 
+		} else if (targy > (getBattleFieldHeight() - 18.0)) {
+			targy = getBattleFieldHeight() - 18.0;
+		}
+		return new Point2D.Double(targx, targy);
 	}
 	
 	/**
