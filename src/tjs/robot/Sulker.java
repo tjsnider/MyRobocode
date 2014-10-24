@@ -42,7 +42,7 @@ public class Sulker extends Robot {
 	double[][] corners;	//  Set corners array {X,Y, left corner, right corner}
 						//  array coordinates offset for width of bot
 	double[] targetCorner = {18.0, 18.0, 1.0, 3.0};	// currently operation corner
-	double[] sweep;	// Sets boundaries of radar sweep	
+	double[] sweep = {180.0, -180.0};	// Sets boundaries of radar sweep	
 	int others; // Number of other robots in the game
 	Map<String, Number> enemy;
 	Map<String, List<Map<String, Number>>> history = new HashMap<String, List<Map<String, Number>>>();
@@ -114,23 +114,25 @@ public class Sulker extends Robot {
 		},
 		// 6 -- duelling state
 		p -> {
-			double bearing = enemy.get("originalBearing").doubleValue();
-			if (enemy.get("distance").doubleValue() > 200) {
-				turnToHeading(normalRelativeAngleDegrees(bearing + 90 - ( 15 * moveToggle)), body);
-			} else {
-				turnToHeading(normalRelativeAngleDegrees(bearing + 90), body);
+			if (enemy != null) {
+				double bearing = enemy.get("originalBearing").doubleValue();
+				if (enemy.get("distance").doubleValue() > 200) {
+					turnRight(bearing + 90 - ( 15 * moveToggle));
+				} else {
+					turnRight(bearing + 90);
+				}
+				ahead(150 * moveToggle);
+				sweep[0] = bearing + 90;
+				sweep[1] = bearing - 90;
 			}
-			ahead(150 * moveToggle);
-			sweep[0] = bearing + 90;
-			sweep[1] = bearing - 90;
-			moveToggle = 0 - moveToggle;
 		}
 	);
 	// current movement strategy
 	int moveState = 1;
+	private boolean found;
 	// list of radar sweep strategies
 	List<Consumer<Point2D.Double>> radarStrategies = Arrays.asList(
-			p -> { turnRadarRight(360); },
+			p -> { found = false; while (!found ) {turnRadarRight(45);} },
 			p -> {
 				turnToHeading(toDegrees(Math.atan2(corners[(int)targetCorner[2]][0]-p.getX(), 
 						   						   corners[(int)targetCorner[2]][1]-p.getY())), radar);
@@ -226,6 +228,7 @@ public class Sulker extends Robot {
 	private void move(double x, double y) {
 		if (others == 1) {	// Begin the duel!
 			moveState = 6;
+			radarState = 0;
 		}
 		//out.println("Moving. Strategy: "+moveState);
 		movementStrategies.get(moveState).accept(new Point2D.Double(x, y));
@@ -282,6 +285,7 @@ public class Sulker extends Robot {
 		scanned.remove(e.getName());
 		if (others == 1) {	// Begin the duel!
 			moveState = 6;
+			radarState = 0;
 		}
 		out.println(e.getName()+" died.  "+others+" remain.");
 	}
@@ -297,6 +301,7 @@ public class Sulker extends Robot {
 	 */
 	public void onScannedRobot(ScannedRobotEvent e) {
 		//out.println("Scanned a robot.");
+		found = true;
 		enemy = new HashMap<String, Number>();
 		enemy.put("time", getTime());
 		enemy.put("distance", e.getDistance());
@@ -317,7 +322,9 @@ public class Sulker extends Robot {
 			bullet = 3 < energy ? 3 : energy;
 		}
 		enemy.put("power", bullet);
-
+		enemy.put("wallcrawling", enemy.get("velocity").doubleValue() != 0.0 && (enemy.get("heading").doubleValue() == 0.0 || 
+				enemy.get("heading").doubleValue() == 90.0 || enemy.get("heading").doubleValue() == 180.0 ||
+				enemy.get("heading").doubleValue() == 270.0) ? 1 : 0);
 		// add scan to list of scanned robots
 		String name = e.getName();
 		scanned.put(name, enemy);
@@ -330,15 +337,21 @@ public class Sulker extends Robot {
 		history.get(name).add(enemy);
 
 		// analyze history for wall-crawling behavior -- easier to hit with simple linear prediction
-		boolean wallcrawler = (history.get(name).stream()
-				.filter(r -> r.get("velocity").doubleValue() != 0.0 && (r.get("heading").doubleValue() == 0.0 || 
-					r.get("heading").doubleValue() == 90.0 || r.get("heading").doubleValue() == 180.0 ||
-					r.get("heading").doubleValue() == 270.0)).count() / history.get(name).size()) > .7;
+		long amtcrawling = history.get(name).stream()
+				.filter(r -> r.get("wallcrawling").intValue() == 1)
+				.count();
+		double percentage = amtcrawling * 100 / history.get(name).size();
+		boolean wallcrawler = percentage > 70;
 		if (wallcrawler) {
+			out.println(name+" is a wallcrawler ("+percentage+")");
 			targetingStrategies.get(0).accept(enemy);
 		} else {
+			out.println(name+" is not a wallcrawler ("+percentage+")");
 			targetingStrategies.get(1).accept(enemy);
 		}
+		out.println(name+" heading = "+enemy.get("heading").doubleValue());
+		out.println(name+" heading is square? "+enemy.get("wallcrawling").intValue());
+		out.println(name+" velocity = "+enemy.get("velocity").doubleValue());
 	}
 	
 	public void onBulletHit(BulletHitEvent e) {
@@ -445,7 +458,7 @@ public class Sulker extends Robot {
 		double bullet = e.get("power").doubleValue();
 		double absoluteBearing =  e.get("absoluteBearingRadians").doubleValue();
 		Random guess = new Random(Instant.now().toEpochMilli()); 
-		double secondGuess = guess.nextGaussian() / 3.0;
+		double secondGuess = guess.nextGaussian() / 2;
 		
 		// calculate rough linear prediction targeting
 		double timeToTarget = Rules.getBulletSpeed(bullet);
