@@ -8,7 +8,6 @@ import java.awt.geom.Point2D;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -16,6 +15,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.function.Consumer;
 
+import robocode.BattleEndedEvent;
 import robocode.BulletHitBulletEvent;
 import robocode.BulletHitEvent;
 import robocode.BulletMissedEvent;
@@ -165,6 +165,7 @@ public class Sulker extends Robot {
 	Map<String, Number> identity;	// identity map for parallel stream reduce methods
 	
 	Map<String, Integer> stats;
+	static List<Map<String, Integer>> statHistory = new ArrayList<Map<String, Integer>>();
 	
 	public void run() {
 		double[][] setCorners = {{18.0, 18.0, 1.0, 3.0},
@@ -181,11 +182,13 @@ public class Sulker extends Robot {
 		setScanColor(Color.white);
 		
 		// Initialize statistics
-		stats = new HashMap<String, Integer>(4);
+		stats = new HashMap<String, Integer>(6);
 		stats.put("shots", 0);
 		stats.put("hits", 0);
 		stats.put("misses", 0);
 		stats.put("bullets", 0);
+		stats.put("written", 0);
+		stats.put("round", getRoundNum());
 
 		// Save # of other bots
 		others = getOthers();
@@ -311,6 +314,8 @@ public class Sulker extends Robot {
 		enemy.put("heading", e.getHeading());
 		enemy.put("headingRadians", e.getHeadingRadians());
 		enemy.put("energy", e.getEnergy());
+		enemy.put("origX", getX() +  Math.sin(enemy.get("originalBearing").doubleValue()) * enemy.get("distance").doubleValue());
+		enemy.put("origY", getY() +  Math.cos(enemy.get("originalBearing").doubleValue()) * enemy.get("distance").doubleValue());
 		// lower power moves faster and easier to reach distant targets
 		double bullet = 1.0;
 		double energy = getEnergy();
@@ -334,9 +339,14 @@ public class Sulker extends Robot {
 			List<Map<String, Number>> empty = new LinkedList<Map<String, Number>>(); 
 			history.put(name, empty);
 		} else {
-			if (enemy.get("energy").doubleValue() != history.get(name).get(history.get(name).size()-1).get("energy").doubleValue()) {
+			Map<String, Number> lastScan = history.get(name).get(history.get(name).size()-1);
+			if (enemy.get("energy").doubleValue() != lastScan.get("energy").doubleValue() && Math.random() > 0.3) {
 				moveToggle = 0 - moveToggle;
 			}
+			enemy.put("prevVelo", lastScan.get("velocity").doubleValue());
+			enemy.put("prevX", lastScan.get("origX").doubleValue());
+			enemy.put("prevY", lastScan.get("origY").doubleValue());
+			enemy.put("prevHeading", lastScan.get("heading").doubleValue());
 		}
 		history.get(name).add(enemy);
 
@@ -366,19 +376,38 @@ public class Sulker extends Robot {
 	}
 	
 	public void onDeath(DeathEvent e) {
-		out.println("Statistics -- "+stats);
-		if (stats.get("shots") != 0) {
+		if (stats.get("shots") != 0 && stats.get("written").intValue() == 0) {
+			out.println("Statistics -- "+stats);
 			out.println("Accuracy: "+stats.get("hits")*100/stats.get("shots"));
+			stats.put("written", 1);
+			statHistory.add(stats);
+
+			int hitstat = statHistory.stream().mapToInt(s -> s.get("hits").intValue()).sum();
+			int shotstat = statHistory.stream().mapToInt(s -> s.get("shots").intValue()).sum();
+			out.println("Battle Shots Fired: "+shotstat);
+			out.println("Battle Hits Scored: "+hitstat);
+			out.println("Battle Accurracy: "+hitstat*100/shotstat);
 		}
 	}
 	
 	public void onRoundEnded(RoundEndedEvent e) {
-		out.println("Statistics -- "+stats);
-		if (stats.get("shots") != 0) {
+		if (stats.get("shots") != 0 && stats.get("written").intValue() == 0) {
+			out.println("Statistics -- "+stats);
 			out.println("Accuracy: "+stats.get("hits")*100/stats.get("shots"));
+			stats.put("written", 1);
+			statHistory.add(stats);
+
+			int hitstat = statHistory.stream().mapToInt(s -> s.get("hits").intValue()).sum();
+			int shotstat = statHistory.stream().mapToInt(s -> s.get("shots").intValue()).sum();
+			out.println("Battle Shots Fired: "+shotstat);
+			out.println("Battle Hits Scored: "+hitstat);
+			out.println("Battle Accurracy: "+hitstat*100/shotstat);
 		}
 	}
-
+	
+	public void onBattleEnded(BattleEndedEvent e) {
+	}
+	
 	/**
 	 * Stolen directly from TrackFire bot
 	 * 
@@ -426,8 +455,7 @@ public class Sulker extends Robot {
 		double absoluteBearing = e.get("absoluteBearingRadians").doubleValue();
 		
 		// calculate rough linear prediction targeting
-		double timeToTarget = Rules.getBulletSpeed(bullet);
-		double adjustment = Math.asin((robotVelocity * Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing) / timeToTarget));
+		double adjustment = Math.asin((robotVelocity * Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing) / Rules.getBulletSpeed(bullet)));
 		// check for walls
 		Point2D targPoint = checkWallCollision(new Point2D.Double(x,y), absoluteBearing + adjustment, robotDistance);
 		double angle = toDegrees(Math.atan2(targPoint.getX()-x, targPoint.getY()-y));
@@ -453,19 +481,36 @@ public class Sulker extends Robot {
 		double x = getX();
 		double y = getY();
 		double robotDistance = e.get("distance").doubleValue();
-		double robotVelocity = e.get("velocity").doubleValue();
-		double bullet = e.get("power").doubleValue();
-		double absoluteBearing =  e.get("absoluteBearingRadians").doubleValue();
-		Random guess = new Random(Instant.now().toEpochMilli()); 
-		double secondGuess = guess.nextGaussian() / 2;
+		double robotVelocity = 8; // e.get("velocity").doubleValue();
+		double angle = 0;
+		double adjustment = 0;
+		Point2D targPoint = new Point2D.Double(e.get("origX").doubleValue(), e.get("origY").doubleValue());
 		
-		// calculate rough linear prediction targeting
-		double timeToTarget = Rules.getBulletSpeed(bullet);
-		double adjustment = Math.asin((robotVelocity * Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing) / timeToTarget));
-		adjustment = adjustment * secondGuess;
-		// check for walls
-		Point2D targPoint = checkWallCollision(new Point2D.Double(x,y), absoluteBearing + adjustment, robotDistance);
-		double angle = toDegrees(Math.atan2(targPoint.getX()-x, targPoint.getY()-y));
+		if (e.get("energy").doubleValue() != 0.0) {
+			double bullet = e.get("power").doubleValue();
+			double absoluteBearing =  e.get("absoluteBearingRadians").doubleValue();
+			Random guess = new Random(Instant.now().toEpochMilli());
+			// nextGaussian gives results -3 to 3 (three standard deviations) making 0 most likely result,
+			// but robot is fairly unlikely to stand still.  So, divide by 3 to get results from -1 to 1,
+			// offset by, oh, .25 (assumption: robot is going to move, but less that maximum possible),
+			// then flip positive/negative at random to model forward and backward @ relative equality
+			double secondGuess = ((guess.nextGaussian() / 3) + 0.25) * (guess.nextBoolean() ? 1 : -1);
+			
+			// calculate rough linear prediction targeting
+			adjustment = Math.asin((robotVelocity * Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing) / Rules.getBulletSpeed(bullet)));
+			if (Double.isNaN(adjustment)) {
+				out.println("Velocity "+robotVelocity);
+				out.println("Heading(radians) "+e.get("headingRadians"));
+				out.println("Absolute Bearing: "+absoluteBearing);
+				out.println("Time to Target: "+Rules.getBulletSpeed(bullet));
+				out.println("sin(heading-absolutebearing): "+Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing));
+				out.println("All together: "+(robotVelocity * Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing) / Rules.getBulletSpeed(bullet)));
+			}
+			adjustment = adjustment * secondGuess;
+			// check for walls
+			targPoint = checkWallCollision(new Point2D.Double(x,y), absoluteBearing + adjustment, robotDistance);
+		}
+		angle = toDegrees(enemy.get("absoluteBearingRadians").doubleValue());
 		enemy.put("bearing", angle);
 		enemy.put("adjustment", adjustment);
 		enemy.put("x", new Integer((int)targPoint.getX()));
@@ -477,7 +522,6 @@ public class Sulker extends Robot {
 		} else {
 			enemy.put("score",  -(adjustment + angle/30 + robotDistance));
 		}
-		//out.println("Added scanned robot: "+scan);
 	}
 	
 	/**
