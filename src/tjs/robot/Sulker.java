@@ -340,7 +340,7 @@ public class Sulker extends Robot {
 			history.put(name, empty);
 		} else {
 			Map<String, Number> lastScan = history.get(name).get(history.get(name).size()-1);
-			if (enemy.get("energy").doubleValue() != lastScan.get("energy").doubleValue()) {
+			if (enemy.get("energy").doubleValue() != lastScan.get("energy").doubleValue() && Math.random() > 0.3) {
 				moveToggle = 0 - moveToggle;
 			}
 			enemy.put("prevVelo", lastScan.get("velocity").doubleValue());
@@ -510,7 +510,7 @@ public class Sulker extends Robot {
 			// check for walls
 			targPoint = checkWallCollision(new Point2D.Double(x,y), absoluteBearing + adjustment, robotDistance);
 		}
-		angle = toDegrees(Math.atan2(targPoint.getX()-x, targPoint.getY()-y));
+		angle = toDegrees(enemy.get("absoluteBearingRadians").doubleValue());
 		enemy.put("bearing", angle);
 		enemy.put("adjustment", adjustment);
 		enemy.put("x", new Integer((int)targPoint.getX()));
