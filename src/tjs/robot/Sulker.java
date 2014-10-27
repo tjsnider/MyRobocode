@@ -319,9 +319,9 @@ public class Sulker extends Robot {
 		// lower power moves faster and easier to reach distant targets
 		double bullet = 1.0;
 		double energy = getEnergy();
-		if (enemy.get("distance").doubleValue() > 200 || energy < 15) {
+		if (enemy.get("distance").doubleValue() > 400 || energy < 15) {
 			bullet = 1.0;
-		} else if (enemy.get("distance").doubleValue() > 50) {
+		} else if (enemy.get("distance").doubleValue() > 200) {
 			bullet = 2 < energy ? 2 : energy;
 		} else {
 			bullet = 3 < energy ? 3 : energy;
