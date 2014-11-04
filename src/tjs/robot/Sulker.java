@@ -53,16 +53,18 @@ public class Sulker extends AdvancedRobot {
 	double minY = margin;
 	double rectHeight;
 	double rectWidth;
-
-	
+	private boolean found;
 	int others; // Number of other robots in the game
+	int moveToggle = 1; // allow movement direction to flip back and forth
+	int radarToggle = 1; // allow radar to flip back and forth
+
+	// Maps for handling scanning of enemy bots
 	Map<String, Map<String, Number>> scanned; // contains vital statistics of
 												// potential targets
 	Map<String, Number> enemy; // current working potential target
 	Map<String, List<Map<String, Number>>> history = new HashMap<String, List<Map<String, Number>>>();
-	// history of scanned targets
-	Map<String, Number> identity; // identity map for parallel stream reduce
-									// methods
+								// history of scanned targets
+	Map<String, Number> identity; // identity map for parallel stream reduce methods
 
 	Map<String, Integer> stats;
 	static List<Map<String, Integer>> statHistory = new ArrayList<Map<String, Integer>>();
@@ -79,13 +81,11 @@ public class Sulker extends AdvancedRobot {
 		setTurnRadarRightRadians(normalRelativeAngle(bearing - getRadarHeadingRadians()));
 	};
 
-	int moveToggle = 1; // allow movement direction to flip back and forth
-	int radarToggle = 1; // allow radar to flip back and forth
 	// list of movement states utilized by move() function
 	List<Consumer<Point2D>> movementStates;
 	// current movement strategy
 	int moveState = initializeMovementStates();
-	private boolean found;
+	
 	// list of radar sweep strategies
 	List<Consumer<Point2D>> radarStrategies = Arrays.asList(
 			p -> {
@@ -115,6 +115,7 @@ public class Sulker extends AdvancedRobot {
 			});
 	// current radar strategy
 	int radarState = 1;
+	
 	// list of targeting strategies
 	List<Consumer<Map<String, Number>>> targetingStrategies = Arrays.asList(
 	// weighted linear prediction
@@ -231,16 +232,16 @@ public class Sulker extends AdvancedRobot {
 	 * 
 	 */
 	public void onHitRobot(HitRobotEvent e) {
-	
+		recenter(new Point2D.Double(getX(), getY()));
 	}
 
 	public void onHitWall(HitWallEvent e) {
-		// plot a course from the center out to this point
+/*		// plot a course from the center out to this point
 		destination.setLocation(boundries.getCenterX(), boundries.getCenterY());
 		Point2D here = new Point2D.Double(getX(), getY());
 		turnToHeading(atan2(here.getX() - destination.getX(), here.getY() - destination.getY()), body);
 		setBack(destination.distance(here));
-	}
+*/	}
 
 	/**
 	 * onRobotDeath: update other robot count variable for strategic adjustments
@@ -279,10 +280,10 @@ public class Sulker extends AdvancedRobot {
 		enemy.put("headingRadians", e.getHeadingRadians());
 		enemy.put("energy", e.getEnergy());
 		enemy.put("origX",
-				getX() + Math.sin(enemy.get("originalBearing").doubleValue())
+				getX() + Math.sin(enemy.get("absoluteBearingRadians").doubleValue())
 						* enemy.get("distance").doubleValue());
 		enemy.put("origY",
-				getY() + Math.cos(enemy.get("originalBearing").doubleValue())
+				getY() + Math.cos(enemy.get("absoluteBearingRadians").doubleValue())
 						* enemy.get("distance").doubleValue());
 		// lower power moves faster and easier to reach distant targets
 		double bullet = 1.0;
@@ -336,6 +337,8 @@ public class Sulker extends AdvancedRobot {
 		} else {
 			targetingStrategies.get(1).accept(enemy);
 		}
+		
+		//out.println("Scanned robot: "+enemy);
 	}
 
 	public void onBulletHit(BulletHitEvent e) {
@@ -416,23 +419,13 @@ public class Sulker extends AdvancedRobot {
 		RoundRectangle2D corner4;
 		// dodging about in a corner has a looser definition of corner than
 		// other movement states
-		if (moveState == 4) {
-			corner1 = new RoundRectangle2D.Double(0, 0, 200, 200, 36, 36);
+			corner1 = new RoundRectangle2D.Double(0, 0, 100, 100, 36, 36);
 			corner2 = new RoundRectangle2D.Double(0,
-					getBattleFieldWidth() - 200, 200, 200, 36, 36);
-			corner3 = new RoundRectangle2D.Double(getBattleFieldHeight() - 200,
-					getBattleFieldWidth() - 200, 200, 200, 36, 36);
-			corner4 = new RoundRectangle2D.Double(getBattleFieldHeight() - 200,
-					0, 200, 200, 36, 36);
-		} else {
-			corner1 = new RoundRectangle2D.Double(0, 0, 72, 72, 5, 5);
-			corner2 = new RoundRectangle2D.Double(0,
-					getBattleFieldWidth() - 72, 72, 72, 5, 5);
-			corner3 = new RoundRectangle2D.Double(getBattleFieldHeight() - 72,
-					getBattleFieldWidth() - 72, 72, 72, 5, 5);
-			corner4 = new RoundRectangle2D.Double(getBattleFieldHeight() - 72,
-					0, 72, 72, 5, 5);
-		}
+					getBattleFieldWidth() - 100, 100, 100, 36, 36);
+			corner3 = new RoundRectangle2D.Double(getBattleFieldHeight() - 100,
+					getBattleFieldWidth() - 100, 100, 100, 36, 36);
+			corner4 = new RoundRectangle2D.Double(getBattleFieldHeight() - 100,
+					0, 100, 100, 36, 36);
 		g.setColor(Color.magenta);
 		g.draw(corner1);
 		g.draw(corner2);
@@ -450,12 +443,8 @@ public class Sulker extends AdvancedRobot {
 	}
 
 	private void recenter(Point2D origin) {
-		stop();
-		Point2D target = new Point2D.Double(boundries.getCenterX(), boundries.getCenterY());
-		double bearing = atan2(target.getX()-origin.getX(), target.getY()-origin.getY());
-		turnRightRadians(normalRelativeAngle(bearing - getHeadingRadians()));
-		setMaxVelocity(Rules.MAX_VELOCITY);
-		ahead(2 * margin);
+		moveState = 6;
+		move(origin);
 	}
 
 	/**
@@ -619,13 +608,13 @@ public class Sulker extends AdvancedRobot {
 		RoundRectangle2D corner2;
 		RoundRectangle2D corner3;
 		RoundRectangle2D corner4;
-		corner1 = new RoundRectangle2D.Double(0, 0, 200, 200, 36, 36);
+		corner1 = new RoundRectangle2D.Double(0, 0, 100, 100, 36, 36);
 		corner2 = new RoundRectangle2D.Double(0,
-				getBattleFieldWidth() - 200, 200, 200, 36, 36);
-		corner3 = new RoundRectangle2D.Double(getBattleFieldHeight() - 200,
-				getBattleFieldWidth() - 200, 200, 200, 36, 36);
-		corner4 = new RoundRectangle2D.Double(getBattleFieldHeight() - 200,
-				0, 200, 200, 36, 36);
+				getBattleFieldWidth() - 100, 100, 100, 36, 36);
+		corner3 = new RoundRectangle2D.Double(getBattleFieldHeight() - 100,
+				getBattleFieldWidth() - 100, 100, 100, 36, 36);
+		corner4 = new RoundRectangle2D.Double(getBattleFieldHeight() - 100,
+				0, 100, 100, 36, 36);
 		return corner1.contains(p) || corner2.contains(p)
 				|| corner3.contains(p) || corner4.contains(p);
 	}
@@ -637,31 +626,9 @@ public class Sulker extends AdvancedRobot {
 	 * @param target - Point2D representation of the destination coordinates
 	 */
 	private void layCourse(Point2D origin, Point2D target) {
-//		double velocity = Rules.MAX_VELOCITY;
-		out.println("Mapping from "+origin+" to "+target);
 		double bearing = atan2(target.getX()-origin.getX(), target.getY()-origin.getY());
-		out.println("Turning to bearing "+bearing);
 		turnToHeading(bearing, body);
-		out.println("Setting travel distance "+origin.distance(target));
 		setAhead(origin.distance(target));
-		
-/*		double turnRemaining = getTurnRemainingRadians(); 
-		if (turnRemaining != 0) {
-			double botDiagonal = Math.sqrt(36 * 36 * 2);
-			double radius = velocity / Rules.getTurnRateRadians(velocity) + botDiagonal; // add bot size to radius for safety
-			double x = origin.getX();
-			double y = origin.getY();
-			// construct a box circumscribing the circle of the turn
-			// is it entirely within the boundary rectangle?
-			// Ok, so not entirely accurate, but relatively quick to calculate
-			Rectangle2D circle = new Rectangle2D.Double(x - radius, y - radius, 2 * radius, 2 * radius);
-			while (!boundries.contains(circle)) {
-				velocity--;
-				radius = velocity / Rules.getTurnRateRadians(velocity) + botDiagonal; // add bot size to radius for safety
-				circle.setRect(x - radius, y - radius, 2 * radius, 2 * radius);
-			}
-			setMaxVelocity(velocity);
-		}  */
 	}
 
 	/**
@@ -811,9 +778,9 @@ public class Sulker extends AdvancedRobot {
 		movementStates.add(p -> {
 			if (inCorner(p)) {
 				if (getVelocity() >= 0 || Math.random() > .1) {
-					double x = boundries.getMinX() + boundries.getWidth()
+					double x = boundries.getMinX() + boundries.getCenterX()
 							* Math.random();
-					double y = boundries.getMinY() + boundries.getHeight()
+					double y = boundries.getMinY() + boundries.getCenterY()
 							* Math.random();
 					destination.setLocation(x, y);
 					layCourse(p, destination);
@@ -825,14 +792,32 @@ public class Sulker extends AdvancedRobot {
 		// 5 - stalking last enemy
 		movementStates.add(p -> {
 			if (enemy != null) {
-				double bearing = enemy.get("originalBearing").doubleValue();
-				if (enemy.get("distance").doubleValue() > 200) {
-					bearing = bearing + PI / 2 - (PI / 8 * moveToggle);
-				} else {
-					bearing = bearing + PI / 2;
-				}
-				turnToHeading(bearing, body);
-				setAhead(150);
+/*				if (getTurnRemainingRadians() == 0 && getDistanceRemaining() == 0) {
+					double bearing = enemy.get("originalBearing").doubleValue();
+					if (enemy.get("distance").doubleValue() > 200) {
+						bearing = bearing + PI/2 - (PI/8 * moveToggle);
+					} else {
+						bearing = bearing + PI/2;
+					}
+					setMaxVelocity(0);
+					turnToHeading(bearing, body);
+					setAhead(150);
+				} else if (getTurnRemainingRadians() == 0) {
+					setMaxVelocity(Rules.MAX_VELOCITY);
+				} */
+				destination.setLocation(enemy.get("origX").doubleValue(), enemy.get("origY").doubleValue());
+				layCourse(p, destination);
+			}
+			if (radarState != 0) { radarState = 0; }
+		});
+		// 6 - recentering
+		movementStates.add(p -> {
+			if (!boundries.contains(p)) {
+				layCourse(p, new Point2D.Double(boundries.getCenterX(), boundries.getCenterY()));
+			} else if (others == 1) {
+				moveState = 5;
+			} else {
+				moveState = 0;
 			}
 		});
 		
