@@ -1,10 +1,14 @@
 package tjs.robot;
 
-import static robocode.util.Utils.normalRelativeAngleDegrees;
+import static java.lang.Math.PI;
+import static java.lang.Math.atan2;
+import static robocode.util.Utils.normalRelativeAngle;
 
 import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.geom.Point2D;
+import java.awt.geom.Rectangle2D;
+import java.awt.geom.RoundRectangle2D;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -15,14 +19,16 @@ import java.util.Map;
 import java.util.Random;
 import java.util.function.Consumer;
 
+import robocode.AdvancedRobot;
 import robocode.BattleEndedEvent;
 import robocode.BulletHitBulletEvent;
 import robocode.BulletHitEvent;
 import robocode.BulletMissedEvent;
+import robocode.Condition;
+import robocode.CustomEvent;
 import robocode.DeathEvent;
 import robocode.HitRobotEvent;
 import robocode.HitWallEvent;
-import robocode.Robot;
 import robocode.RobotDeathEvent;
 import robocode.RoundEndedEvent;
 import robocode.Rules;
@@ -38,149 +44,690 @@ import robocode.WinEvent;
  * @author Ted Snider
  *
  */
-public class Sulker extends Robot {
-	double[][] corners;	//  Set corners array {X,Y, left corner, right corner}
-						//  array coordinates offset for width of bot
-	double[] targetCorner = {18.0, 18.0, 1.0, 3.0};	// currently operation corner
-	double[] sweep = {180.0, -180.0};	// Sets boundaries of radar sweep	
-	int others; // Number of other robots in the game
-	Map<String, Number> enemy;
-	Map<String, List<Map<String, Number>>> history = new HashMap<String, List<Map<String, Number>>>();
+public class Sulker extends AdvancedRobot {
+	// movement and battlefield dimension attributes.
+	Point2D destination;
+	Rectangle2D boundries;
+	double margin = 40;
+	double minX = margin;
+	double minY = margin;
+	double rectHeight;
+	double rectWidth;
 
-	// Since I'm always turning something to match a given bearing and all that varies is what...
-	Consumer<Double> gun = bearing -> { 
-		turnGunRight(normalRelativeAngleDegrees(bearing - getGunHeading())) ;
+	
+	int others; // Number of other robots in the game
+	Map<String, Map<String, Number>> scanned; // contains vital statistics of
+												// potential targets
+	Map<String, Number> enemy; // current working potential target
+	Map<String, List<Map<String, Number>>> history = new HashMap<String, List<Map<String, Number>>>();
+	// history of scanned targets
+	Map<String, Number> identity; // identity map for parallel stream reduce
+									// methods
+
+	Map<String, Integer> stats;
+	static List<Map<String, Integer>> statHistory = new ArrayList<Map<String, Integer>>();
+
+	// Since I'm always turning something to match a given bearing and all that
+	// varies is what...
+	Consumer<Double> gun = bearing -> {
+		setTurnGunRightRadians(normalRelativeAngle(bearing - getGunHeadingRadians()));
 	};
-	Consumer<Double> body = bearing -> { 
-		turnRight(normalRelativeAngleDegrees(bearing - getHeading())) ;
+	Consumer<Double> body = bearing -> {
+		setTurnRightRadians(normalRelativeAngle(bearing - getHeadingRadians()));
 	};
 	Consumer<Double> radar = bearing -> {
-		turnRadarRight(normalRelativeAngleDegrees(bearing - getRadarHeading())) ;
+		setTurnRadarRightRadians(normalRelativeAngle(bearing - getRadarHeadingRadians()));
 	};
 
-	int moveToggle = 1; // allow to flip back and forth
-	// list of movement strategies utilized by move() function
-	List<Consumer<Point2D.Double>> movementStrategies = Arrays.asList(
-		// 0
-		p -> {
-			double x = getX();
-			double y = getY();
-			if ((x < 19 || x > 980) && (y < 19 || y > 980)) { 
-				double[] corner = targetCorner;	
-				double[] course = plotNextCorner(x, y); // side-effect changes current corner
-				targetCorner = corner; // reset current corner
-				course[1] = 100.0;
-				layCourse(course);
-				turnRight(135);
-				moveState = 4;
-			} else {
-				moveState = 1;
-			}
-			sweep = adjustRadarSweep(x, y);
-		},	
-		// 1
-		p -> { 
-			layCourse(plotNearestCorner(p)); 
-			sweep = adjustRadarSweep(getX(), getY());
-			moveState = 0;
-		},
-		// 2
-		p -> { 
-			layCourse(plotNextCorner(p));  
-			sweep = adjustRadarSweep(getX(), getY());
-			moveState = 0;
-		},
-		// 3
-		p -> {
-			if (Math.random() > 0.5) {
-				layCourse(plotNextCorner(p));
-			} else {
-				layCourse(plotNearestCorner(p));
-			}
-			sweep = adjustRadarSweep(getX(), getY());
-			moveState = 0;
-		},
-		// 4
-		p -> { 
-			ahead(142); 
-			sweep = adjustRadarSweep(getX(), getY());
-			moveState = 5; 
-		},
-		// 5
-		p -> { 
-			back(142); 
-			sweep = adjustRadarSweep(getX(), getY());
-			moveState = 4; 
-		},
-		// 6 -- duelling state
-		p -> {
-			if (enemy != null) {
-				double bearing = enemy.get("originalBearing").doubleValue();
-				if (enemy.get("distance").doubleValue() > 200) {
-					turnRight(bearing + 90 - ( 15 * moveToggle));
-				} else {
-					turnRight(bearing + 90);
-				}
-				ahead(150 * moveToggle);
-				sweep[0] = bearing + 90;
-				sweep[1] = bearing - 90;
-			}
-		}
-	);
+	int moveToggle = 1; // allow movement direction to flip back and forth
+	int radarToggle = 1; // allow radar to flip back and forth
+	// list of movement states utilized by move() function
+	List<Consumer<Point2D>> movementStates;
 	// current movement strategy
-	int moveState = 1;
+	int moveState = initializeMovementStates();
 	private boolean found;
 	// list of radar sweep strategies
-	List<Consumer<Point2D.Double>> radarStrategies = Arrays.asList(
-			p -> { found = false; while (!found ) {turnRadarRight(45);} },
+	List<Consumer<Point2D>> radarStrategies = Arrays.asList(
 			p -> {
-				turnToHeading(toDegrees(Math.atan2(corners[(int)targetCorner[2]][0]-p.getX(), 
-						   						   corners[(int)targetCorner[2]][1]-p.getY())), radar);
+				if (found) {
+					found = false;
+					radarToggle = 0 - radarToggle;
+				}
+				turnRadarRight(45 * radarToggle);
+			},
+			p -> {
+				Point2D next = plotNextCorner(p);
+				turnToHeading(atan2(next.getX() - p.getX(), next.getY() - p.getY()), radar);
 				radarState = 2;
 			},
 			p -> {
-				turnToHeading(toDegrees(Math.atan2(corners[(int)targetCorner[3]][0]-p.getX(), 
-						   						   corners[(int)targetCorner[3]][1]-p.getY())), radar);
+				Point2D prev = plotPreviousCorner(p);
+				turnToHeading(atan2(prev.getX() - p.getX(), prev.getY() - p.getY()), radar);
 				radarState = 1;
 			},
 			p -> {
-				turnToHeading(enemy.get("originalBearing").doubleValue()+90, radar);
+				turnToHeading(enemy.get("originalBearing").doubleValue() + PI/2, radar);
 				radarState = 4;
 			},
 			p -> {
-				turnToHeading(enemy.get("originalBearing").doubleValue()-90, radar);
+				turnToHeading(enemy.get("originalBearing").doubleValue() - PI/2, radar);
 				radarState = 3;
-			}
-	);
+			});
 	// current radar strategy
 	int radarState = 1;
 	// list of targeting strategies
 	List<Consumer<Map<String, Number>>> targetingStrategies = Arrays.asList(
-			// weighted linear prediction
-			e -> { linearPrediction(e); },
-			e -> { gaussianDistributionPrediction(e); }
-	);
-	
-	Map<String, Map<String, Number>> scanned;	// contains vital statistics of potential targets
-	Map<String, Number> identity;	// identity map for parallel stream reduce methods
-	
-	Map<String, Integer> stats;
-	static List<Map<String, Integer>> statHistory = new ArrayList<Map<String, Integer>>();
-	
+	// weighted linear prediction
+			e -> {
+				linearPrediction(e);
+			}, e -> {
+				gaussianDistributionPrediction(e);
+			});
+
+	// List of options for gun ready states
+	List<Consumer<Map<String, Number>>> gunActions = Arrays.asList(g -> {
+		turnToHeading(g.get("bearing").doubleValue(), gun);
+		gunState = 1;
+	}, g -> {
+		setFire(g.get("power").doubleValue());
+		stats.put("shots", stats.get("shots") + 1);
+		gunState = 0;
+	});
+	int gunState = 0;
+
 	public void run() {
-		double[][] setCorners = {{18.0, 18.0, 1.0, 3.0},
-								 {18.0, getBattleFieldHeight()-18.0, 2.0, 0.0},
-								 {getBattleFieldWidth()-18.0, getBattleFieldHeight()-18.0, 3.0, 1.0},
-								 {getBattleFieldWidth()-18.0, 18.0, 0.0, 2.0}};
-		corners = setCorners;
+		initialize();
+
+		double x = getX();
+		double y = getY();
+
+		sweep(new Point2D.Double(x, y));
+		move(new Point2D.Double(x, y));
+
+		while (true) {
+			execute();
+		}
+	}
+
+	private void shoot() {
+		// out.println("Shooting. Strategy: "+targetingState);
+		smartFire();
+	}
+
+	private void sweep(Point2D p) {
+		// out.println("Sweeping. Strategy: "+radarState);
+		radarStrategies.get(radarState).accept(p);
+	}
+
+	private void move(Point2D p) {
+		if (others == 1) { // Begin the duel!
+			moveState = 5;
+			radarState = 0;
+		}
+		// out.println("Moving. Strategy: "+moveState);
+		movementStates.get(moveState).accept(p);
+	}
+	
+	/**
+	 * onCustomEvent
+	 * 
+	 * handle user-defined events.
+	 * 
+	 * Currently when radar completes a sweep or when movement needs rechecked
+	 * 
+	 */
+	public void onCustomEvent(CustomEvent e) {
+		String cond = e.getCondition().getName();
 		
-		// 	Set colors
+		switch (cond) {
+			case "sweepComplete" : 
+				sweep(new Point2D.Double(getX(), getY()));
+				shoot();
+				break;
+			case "moveComplete" :
+				move(new Point2D.Double(getX(), getY()));
+				break;
+			case "turnComplete" :
+				setMaxVelocity(Rules.MAX_VELOCITY);
+				move(new Point2D.Double(getX(), getY()));
+				break;
+		}
+	}
+	
+	/**
+	 * onStatus
+	 * 
+	 * fires every turn
+	 * 
+	 */
+	public void onStatus(StatusEvent e) {
+		if (boundries != null) {
+			double heading = getHeadingRadians();
+			double velocity = Rules.MAX_VELOCITY;
+			double xo = getX();
+			double yo = getY();
+			double xd = xo + Math.sin(heading) * velocity;
+			double yd = yo + Math.cos(heading) * velocity; 
+			if (!boundries.contains(xo, yo)) {
+				recenter(new Point2D.Double(xo, yo));
+			} else if (getTurnRemainingRadians() != 0) {
+				while (!boundries.contains(xd, yd) && velocity >= 0) {
+					velocity--;
+					xd = xo + Math.sin(heading) * velocity;
+					yd = yo + Math.cos(heading) * velocity; 
+				}
+				if (velocity < 0) {
+					recenter(new Point2D.Double(xo, yo));
+				}
+			} 
+			setMaxVelocity(velocity);
+		}
+	}
+
+	/**
+	 * onHitRobot
+	 * 
+	 * need to be able to resume moving toward a corner
+	 * 
+	 */
+	public void onHitRobot(HitRobotEvent e) {
+	
+	}
+
+	public void onHitWall(HitWallEvent e) {
+		// plot a course from the center out to this point
+		destination.setLocation(boundries.getCenterX(), boundries.getCenterY());
+		Point2D here = new Point2D.Double(getX(), getY());
+		turnToHeading(atan2(here.getX() - destination.getX(), here.getY() - destination.getY()), body);
+		setBack(destination.distance(here));
+	}
+
+	/**
+	 * onRobotDeath: update other robot count variable for strategic adjustments
+	 */
+	public void onRobotDeath(RobotDeathEvent e) {
+		others = getOthers();
+		scanned.remove(e.getName());
+		if (others == 1) { // Begin the duel!
+			moveState = 5;
+			radarState = 0;
+		}
+		out.println(e.getName() + " died.  " + others + " remain.");
+	}
+
+	/**
+	 * onScannedRobot
+	 * 
+	 * 1. check heat 2. calculate shot power based in distance...weaker/faster
+	 * for further targets 3. determine an amount to lead target based on
+	 * current velocity
+	 * 
+	 * @param ScannedRobotEvent
+	 *            e - event pertaining to robot scanned
+	 */
+	public void onScannedRobot(ScannedRobotEvent e) {
+		// out.println("Scanned a robot.");
+		found = true;
+		enemy = new HashMap<String, Number>();
+		enemy.put("time", getTime());
+		enemy.put("distance", e.getDistance());
+		enemy.put("originalBearing", e.getBearingRadians());
+		enemy.put("absoluteBearingRadians",
+				getHeadingRadians() + e.getBearingRadians());
+		enemy.put("velocity", e.getVelocity());
+		enemy.put("heading", e.getHeadingRadians());
+		enemy.put("headingRadians", e.getHeadingRadians());
+		enemy.put("energy", e.getEnergy());
+		enemy.put("origX",
+				getX() + Math.sin(enemy.get("originalBearing").doubleValue())
+						* enemy.get("distance").doubleValue());
+		enemy.put("origY",
+				getY() + Math.cos(enemy.get("originalBearing").doubleValue())
+						* enemy.get("distance").doubleValue());
+		// lower power moves faster and easier to reach distant targets
+		double bullet = 1.0;
+		double energy = getEnergy();
+		if (enemy.get("distance").doubleValue() > 400 || energy < 15) {
+			bullet = 1.0;
+		} else if (enemy.get("distance").doubleValue() > 200) {
+			bullet = 2 < energy ? 2 : energy;
+		} else {
+			bullet = 3 < energy ? 3 : energy;
+		}
+		enemy.put("power", bullet);
+		enemy.put(
+				"wallcrawling",
+				enemy.get("velocity").doubleValue() != 0.0
+						&& (enemy.get("heading").doubleValue() == 0.0
+								|| enemy.get("heading").doubleValue() == PI / 2
+								|| enemy.get("heading").doubleValue() == PI || enemy
+								.get("heading").doubleValue() == 1.5 * PI) ? 1
+						: 0);
+		// add scan to list of scanned robots
+		String name = e.getName();
+		scanned.put(name, enemy);
+
+		// add scan to history of that enemy's scans
+		if (!(history.containsKey(name))) {
+			List<Map<String, Number>> empty = new LinkedList<Map<String, Number>>();
+			history.put(name, empty);
+		} else {
+			Map<String, Number> lastScan = history.get(name).get(
+					history.get(name).size() - 1);
+			if (enemy.get("energy").doubleValue() != lastScan.get("energy")
+					.doubleValue() && Math.random() > 0.3) {
+				moveToggle = 0 - moveToggle;
+			}
+			enemy.put("prevVelo", lastScan.get("velocity").doubleValue());
+			enemy.put("prevX", lastScan.get("origX").doubleValue());
+			enemy.put("prevY", lastScan.get("origY").doubleValue());
+			enemy.put("prevHeading", lastScan.get("heading").doubleValue());
+		}
+		history.get(name).add(enemy);
+
+		// analyze history for wall-crawling behavior -- easier to hit with
+		// simple linear prediction
+		long amtcrawling = history.get(name).stream()
+				.filter(r -> r.get("wallcrawling").intValue() == 1).count();
+		double percentage = amtcrawling * 100 / history.get(name).size();
+		boolean wallcrawler = percentage > 70;
+		if (wallcrawler) {
+			targetingStrategies.get(0).accept(enemy);
+		} else {
+			targetingStrategies.get(1).accept(enemy);
+		}
+	}
+
+	public void onBulletHit(BulletHitEvent e) {
+		stats.put("hits", stats.get("hits") + 1);
+	}
+
+	public void onBulletMissed(BulletMissedEvent e) {
+		stats.put("misses", stats.get("misses") + 1);
+	}
+
+	public void onBulletHitBullet(BulletHitBulletEvent e) {
+		stats.put("bullets", stats.get("bullets") + 1);
+	}
+
+	public void onDeath(DeathEvent e) {
+		if (stats.get("shots") != 0 && stats.get("written").intValue() == 0) {
+			out.println("Statistics -- " + stats);
+			out.println("Accuracy: " + stats.get("hits") * 100
+					/ stats.get("shots"));
+			stats.put("written", 1);
+			statHistory.add(stats);
+
+			int hitstat = statHistory.stream()
+					.mapToInt(s -> s.get("hits").intValue()).sum();
+			int shotstat = statHistory.stream()
+					.mapToInt(s -> s.get("shots").intValue()).sum();
+			out.println("Battle Shots Fired: " + shotstat);
+			out.println("Battle Hits Scored: " + hitstat);
+			out.println("Battle Accurracy: " + hitstat * 100 / shotstat);
+		}
+	}
+
+	public void onRoundEnded(RoundEndedEvent e) {
+		if (stats.get("shots") != 0 && stats.get("written").intValue() == 0) {
+			out.println("Statistics -- " + stats);
+			out.println("Accuracy: " + stats.get("hits") * 100
+					/ stats.get("shots"));
+			stats.put("written", 1);
+			statHistory.add(stats);
+
+			int hitstat = statHistory.stream()
+					.mapToInt(s -> s.get("hits").intValue()).sum();
+			int shotstat = statHistory.stream()
+					.mapToInt(s -> s.get("shots").intValue()).sum();
+			out.println("Battle Shots Fired: " + shotstat);
+			out.println("Battle Hits Scored: " + hitstat);
+			out.println("Battle Accurracy: " + hitstat * 100 / shotstat);
+		}
+	}
+
+	public void onBattleEnded(BattleEndedEvent e) {
+	}
+
+	/**
+	 * Stolen directly from TrackFire bot
+	 * 
+	 */
+	public void onWin(WinEvent e) {
+		// Victory dance
+		turnRight(36000);
+	}
+
+	public void onPaint(Graphics2D g) {
+		double x = getX();
+		double y = getY();
+		double heading = getHeadingRadians();
+		double headlightX = x + Math.sin(heading) * 100;
+		double headlightY = y + Math.cos(heading) * 100;
+		g.setColor(Color.white);
+		g.drawLine((int)x, (int)y, (int)headlightX, (int)headlightY);
+		
+		g.setColor(Color.yellow);
+		g.drawLine((int)x, (int)y, (int)destination.getX(), (int)destination.getY());
+
+		RoundRectangle2D corner1;
+		RoundRectangle2D corner2;
+		RoundRectangle2D corner3;
+		RoundRectangle2D corner4;
+		// dodging about in a corner has a looser definition of corner than
+		// other movement states
+		if (moveState == 4) {
+			corner1 = new RoundRectangle2D.Double(0, 0, 200, 200, 36, 36);
+			corner2 = new RoundRectangle2D.Double(0,
+					getBattleFieldWidth() - 200, 200, 200, 36, 36);
+			corner3 = new RoundRectangle2D.Double(getBattleFieldHeight() - 200,
+					getBattleFieldWidth() - 200, 200, 200, 36, 36);
+			corner4 = new RoundRectangle2D.Double(getBattleFieldHeight() - 200,
+					0, 200, 200, 36, 36);
+		} else {
+			corner1 = new RoundRectangle2D.Double(0, 0, 72, 72, 5, 5);
+			corner2 = new RoundRectangle2D.Double(0,
+					getBattleFieldWidth() - 72, 72, 72, 5, 5);
+			corner3 = new RoundRectangle2D.Double(getBattleFieldHeight() - 72,
+					getBattleFieldWidth() - 72, 72, 72, 5, 5);
+			corner4 = new RoundRectangle2D.Double(getBattleFieldHeight() - 72,
+					0, 72, 72, 5, 5);
+		}
+		g.setColor(Color.magenta);
+		g.draw(corner1);
+		g.draw(corner2);
+		g.draw(corner3);
+		g.draw(corner4);
+		g.draw(boundries);
+
+		/*
+		 * g.setColor(Color.green); scanned.entrySet().stream() .filter(r ->
+		 * (getTime() - r.getValue().get("time").longValue()) < 5) .forEach( r
+		 * -> g.drawLine((int)x, (int)y,
+		 * ((Integer)r.getValue().get("x")).intValue(),
+		 * ((Integer)r.getValue().get("y")).intValue()));
+		 */
+	}
+
+	private void recenter(Point2D origin) {
+		stop();
+		Point2D target = new Point2D.Double(boundries.getCenterX(), boundries.getCenterY());
+		double bearing = atan2(target.getX()-origin.getX(), target.getY()-origin.getY());
+		turnRightRadians(normalRelativeAngle(bearing - getHeadingRadians()));
+		setMaxVelocity(Rules.MAX_VELOCITY);
+		ahead(2 * margin);
+	}
+
+	/**
+	 * linearPrediction: uses weighted linear prediction to predict movement and
+	 * weight targets
+	 * 
+	 * @param e
+	 *            - ScannedRobotEvent
+	 */
+	private void linearPrediction(Map<String, Number> e) {
+		double x = getX();
+		double y = getY();
+		double robotDistance = e.get("distance").doubleValue();
+		double robotVelocity = e.get("velocity").doubleValue();
+		double bullet = e.get("power").doubleValue();
+		double absoluteBearing = e.get("absoluteBearingRadians").doubleValue();
+
+		// calculate rough linear prediction targeting
+		double adjustment = Math.asin((robotVelocity
+				* Math.sin(e.get("headingRadians").doubleValue()
+						- absoluteBearing) / Rules.getBulletSpeed(bullet)));
+		// check for walls
+		Point2D targPoint = checkWallCollision(new Point2D.Double(x, y),
+				absoluteBearing + adjustment, robotDistance);
+		double angle = atan2(targPoint.getX() - x, targPoint.getY() - y);
+		enemy.put("bearing", angle);
+		enemy.put("adjustment", adjustment);
+		enemy.put("x", new Integer((int) targPoint.getX()));
+		enemy.put("y", new Integer((int) targPoint.getY()));
+
+		if (enemy.get("energy").doubleValue() == 0.0) {
+			enemy.put("score", 1000.0);
+		} else {
+			enemy.put("score", -(adjustment + angle / (PI / 4) + robotDistance));
+		}
+		// out.println("Added scanned robot: "+scan);
+	}
+
+	/**
+	 * gaussianDistributionPrediction: linear prediction as above, but adjusted
+	 * to factor in random guessing with a gaussian distribution of probability
+	 * 
+	 * @param e
+	 */
+	private void gaussianDistributionPrediction(Map<String, Number> e) {
+		double x = getX();
+		double y = getY();
+		double robotDistance = e.get("distance").doubleValue();
+		double robotVelocity = 8; // e.get("velocity").doubleValue();
+		double angle = 0;
+		double adjustment = 0;
+		Point2D targPoint = new Point2D.Double(e.get("origX").doubleValue(), e
+				.get("origY").doubleValue());
+
+		if (e.get("energy").doubleValue() != 0.0) {
+			double bullet = e.get("power").doubleValue();
+			double absoluteBearing = e.get("absoluteBearingRadians")
+					.doubleValue();
+			Random guess = new Random(Instant.now().toEpochMilli());
+			// nextGaussian gives results -3 to 3 (three standard deviations)
+			// making 0 most likely result,
+			// but robot is fairly unlikely to stand still. So, divide by 3 to
+			// get results from -1 to 1,
+			// offset by, oh, .25 (assumption: robot is going to move, but less
+			// that maximum possible),
+			// then flip positive/negative at random to model forward and
+			// backward @ relative equality
+			double secondGuess = ((guess.nextGaussian() / 3) + 0.25)
+					* (guess.nextBoolean() ? 1 : -1);
+
+			// calculate rough linear prediction targeting
+			adjustment = Math.asin((robotVelocity
+					* Math.sin(e.get("headingRadians").doubleValue()
+							- absoluteBearing) / Rules.getBulletSpeed(bullet)));
+			if (Double.isNaN(adjustment)) {
+				out.println("Velocity " + robotVelocity);
+				out.println("Heading(radians) " + e.get("headingRadians"));
+				out.println("Absolute Bearing: " + absoluteBearing);
+				out.println("Time to Target: " + Rules.getBulletSpeed(bullet));
+				out.println("sin(heading-absolutebearing): "
+						+ Math.sin(e.get("headingRadians").doubleValue()
+								- absoluteBearing));
+				out.println("All together: "
+						+ (robotVelocity
+								* Math.sin(e.get("headingRadians")
+										.doubleValue() - absoluteBearing) / Rules
+									.getBulletSpeed(bullet)));
+			}
+			adjustment = adjustment * secondGuess;
+			// check for walls
+			targPoint = checkWallCollision(new Point2D.Double(x, y),
+					absoluteBearing + adjustment, robotDistance);
+		}
+		angle = enemy.get("absoluteBearingRadians").doubleValue();
+		enemy.put("bearing", angle);
+		enemy.put("adjustment", adjustment);
+		enemy.put("x", new Integer((int) targPoint.getX()));
+		enemy.put("y", new Integer((int) targPoint.getY()));
+
+		if (enemy.get("energy").doubleValue() == 0.0) {
+			enemy.put("score", 1000.0);
+		} else {
+			enemy.put("score", -(adjustment + angle / (PI / 4) + robotDistance));
+		}
+	}
+
+	/**
+	 * smartFire: score targets, determine best target, calculate how much gun,
+	 * and fire.
+	 * 
+	 */
+	private void smartFire() {
+		// abort if heat is > 0, no energy or no scanned robots yet
+		if (getEnergy() > 0 && getGunHeat() == 0 && scanned.size() > 0
+				&& getGunTurnRemaining() == 0) {
+			List<Map<String, Number>> victims = new ArrayList<Map<String, Number>>(
+					scanned.keySet().size());
+			scanned.entrySet()
+					.stream()
+					.filter(r -> (getTime() - r.getValue().get("time")
+							.longValue()) < 10)
+					.forEach(r -> victims.add(r.getValue()));
+			if (victims.size() > 0) {
+				Map<String, Number> victim = victims.stream().reduce(
+						identity,
+						(a, b) -> (a.get("score").doubleValue() > b
+								.get("score").doubleValue()) ? a : b);
+				gunActions.get(gunState).accept(victim);
+			}
+		}
+	}
+
+	private Point2D checkWallCollision(Point2D.Double origin, double bearing,
+			double distance) {
+		double targx = origin.getX() + Math.sin(bearing) * distance;
+		if (targx < 18.0) {
+			targx = 18.0;
+		} else if (targx > (getBattleFieldWidth() - 18.0)) {
+			targx = getBattleFieldWidth() - 18.0;
+		}
+		double targy = origin.getY() + Math.cos(bearing) * distance;
+		if (targy < 18.0) {
+			targy = 18.0;
+		} else if (targy > (getBattleFieldHeight() - 18.0)) {
+			targy = getBattleFieldHeight() - 18.0;
+		}
+		return new Point2D.Double(targx, targy);
+	}
+
+	/**
+	 * inCorner: calculates whether or not current position is close enough to
+	 * being in a corner.
+	 * 
+	 * @param p
+	 *            - Point2D representation of current location
+	 * @return - boolean indicating if we are in position approximately in a
+	 *         corner
+	 */
+	private boolean inCorner(Point2D p) {
+		RoundRectangle2D corner1;
+		RoundRectangle2D corner2;
+		RoundRectangle2D corner3;
+		RoundRectangle2D corner4;
+		corner1 = new RoundRectangle2D.Double(0, 0, 200, 200, 36, 36);
+		corner2 = new RoundRectangle2D.Double(0,
+				getBattleFieldWidth() - 200, 200, 200, 36, 36);
+		corner3 = new RoundRectangle2D.Double(getBattleFieldHeight() - 200,
+				getBattleFieldWidth() - 200, 200, 200, 36, 36);
+		corner4 = new RoundRectangle2D.Double(getBattleFieldHeight() - 200,
+				0, 200, 200, 36, 36);
+		return corner1.contains(p) || corner2.contains(p)
+				|| corner3.contains(p) || corner4.contains(p);
+	}
+
+	/**
+	 * layCourse: combination method to turn toward and move to a point
+	 * 
+	 * @param origin - Point2D representation of the starting coordinates
+	 * @param target - Point2D representation of the destination coordinates
+	 */
+	private void layCourse(Point2D origin, Point2D target) {
+//		double velocity = Rules.MAX_VELOCITY;
+		out.println("Mapping from "+origin+" to "+target);
+		double bearing = atan2(target.getX()-origin.getX(), target.getY()-origin.getY());
+		out.println("Turning to bearing "+bearing);
+		turnToHeading(bearing, body);
+		out.println("Setting travel distance "+origin.distance(target));
+		setAhead(origin.distance(target));
+		
+/*		double turnRemaining = getTurnRemainingRadians(); 
+		if (turnRemaining != 0) {
+			double botDiagonal = Math.sqrt(36 * 36 * 2);
+			double radius = velocity / Rules.getTurnRateRadians(velocity) + botDiagonal; // add bot size to radius for safety
+			double x = origin.getX();
+			double y = origin.getY();
+			// construct a box circumscribing the circle of the turn
+			// is it entirely within the boundary rectangle?
+			// Ok, so not entirely accurate, but relatively quick to calculate
+			Rectangle2D circle = new Rectangle2D.Double(x - radius, y - radius, 2 * radius, 2 * radius);
+			while (!boundries.contains(circle)) {
+				velocity--;
+				radius = velocity / Rules.getTurnRateRadians(velocity) + botDiagonal; // add bot size to radius for safety
+				circle.setRect(x - radius, y - radius, 2 * radius, 2 * radius);
+			}
+			setMaxVelocity(velocity);
+		}  */
+	}
+
+	/**
+	 * plotNearestCorner(Point2D): calculates nearest corner from
+	 * passed-in location
+	 * 
+	 * @param p - current coordinates
+	 * @return Point2D - coordinates of nearest corner
+	 */
+	private Point2D plotNearestCorner(Point2D p) {
+		Point2D corner = new Point2D.Double((p.getX() < boundries.getCenterX()) ? boundries.getMinX() : boundries.getMaxX(), 
+											(p.getY() < boundries.getCenterY()) ? boundries.getMinY() : boundries.getMaxY());
+		return corner;
+	}
+
+	/**
+	 * plotNextCorner(Point2D): calculates coordinates of next clockwise corner from
+	 * passed-in location
+	 * 
+	 * @param p - current coordinates
+	 * @return Point2D - coordinates of next clockwise corner
+	 */
+	private Point2D plotNextCorner(Point2D p) {
+		Point2D corner = new Point2D.Double((p.getY() < boundries.getCenterY()) ? boundries.getMinX() : boundries.getMaxX(), 
+											(p.getX() < boundries.getCenterX()) ? boundries.getMaxY() : boundries.getMinY());
+		return corner;
+	}
+
+	/**
+	 * plotPreviousCorner(Point2D): calculates direction and distance of
+	 * previous corner in corners array from the passed-in location
+	 * 
+	 * @param p - current coordinates
+	 * @return double array of polar coordinates for course (angle, distance)
+	 */
+	private Point2D plotPreviousCorner(Point2D p) {
+		Point2D corner = new Point2D.Double((p.getY() < boundries.getCenterY()) ? boundries.getMaxX() : boundries.getMinX(), 
+											(p.getX() < boundries.getCenterX()) ? boundries.getMinY() : boundries.getMaxY());
+		return corner;
+	}
+
+	/**
+	 * Constantly turning things right to match new bearings
+	 * 
+	 * @param theta
+	 *            - bearing to match
+	 * @param operator
+	 *            - body part (body, gun, radar) to turn
+	 */
+	private void turnToHeading(double theta, Consumer<Double> operator) {
+		operator.accept(theta);
+	}
+
+	private void initialize() {
+		rectHeight = getBattleFieldHeight() - (2 * margin);
+		rectWidth = getBattleFieldWidth() - (2 * margin);
+		boundries = new Rectangle2D.Double(minX, minY, rectWidth, rectHeight);
+		destination = new Point2D.Double(minX, minY);
+
+		// Set colors
 		setBodyColor(Color.black);
 		setGunColor(Color.white);
 		setRadarColor(Color.red);
-		setBulletColor(Color.red);
+		setBulletColor(Color.white);
 		setScanColor(Color.white);
-		
+
 		// Initialize statistics
 		stats = new HashMap<String, Integer>(6);
 		stats.put("shots", 0);
@@ -198,485 +745,97 @@ public class Sulker extends Robot {
 		identity = new HashMap<String, Number>(1);
 		identity.put("score", new Double(-50000.0));
 
-		// uncouple the gun from the body
+		// decouple the gun from the body
 		setAdjustGunForRobotTurn(true);
-		// uncouple radar from gun
+		// decouple radar from gun
 		setAdjustRadarForGunTurn(true);
 		
-		while (true) {
-			double x = getX();
-			double y = getY();
-			sweep(x,y);
-			shoot();
-			move(x,y);
-		}
-	}
-	
-	/**
-	 * onStatus: called every turn to provide a snapshot of data to the robot
-	 */
-	public void onStatus(StatusEvent e) {
-	}
-	
-	private void shoot() {
-		//out.println("Shooting. Strategy: "+targetingState);
-		smartFire();
-	}
-
-	private void sweep(double x, double y) {
-		//out.println("Sweeping. Strategy: "+radarState);
-		radarStrategies.get(radarState).accept(new Point2D.Double(x, y));
-	}
-
-	private void move(double x, double y) {
-		if (others == 1) {	// Begin the duel!
-			moveState = 6;
-			radarState = 0;
-		}
-		//out.println("Moving. Strategy: "+moveState);
-		movementStrategies.get(moveState).accept(new Point2D.Double(x, y));
-	}
-
-	/**
-	 * onHitRobot
-	 * 
-	 * need to be able to resume moving toward a corner
-	 * 
-	 */
-	public void onHitRobot(HitRobotEvent e) {
-		//out.println("Oh no! I've hit a robot. ("+getX()+", "+getY()+")");
-		// If he's in front of us, set back up a bit.
-		double bearing = e.getBearing();
-		if (bearing > -90 && bearing < 90) {
-			// target and fire
-			if (getGunHeat() == 0 && Math.abs(bearing) < 30) {
-				fire(3);
-				stats.put("shots", stats.get("shots")+1);
+		addCustomEvent(new Condition("moveComplete") { 
+			public boolean test() { 
+				return getDistanceRemaining() == 0; 
 			}
-			
-			back(100);
-		} else {
-			// target and fire
-			if (getGunHeat() == 0 && Math.abs(bearing) < 30) {
-				fire(3);
-				stats.put("shots", stats.get("shots")+1);
+		});
+		
+		addCustomEvent(new Condition("turnComplete") {
+			public boolean test() {
+				return getTurnRemainingRadians() == 0;
 			}
-			
-			ahead(100);
-		}
-
-		if (moveState != 6) { moveState = 3; }
-	}
-	
-	public void onHitWall(HitWallEvent e) {
-		//out.println("I've hit a wall.");
-		double x = getX();
-		if ((moveState == 4 || moveState== 5) && (x < 100.0 || x > 900.0)) { 
-			moveState = 2; 
-		} else if (moveState != 6) {
-			moveState = 2;
-		} else {
-			moveToggle = 0 - moveToggle;
-		}
-	} 
-	
-	/**
-	 * onRobotDeath: update other robot count variable for strategic adjustments
-	 */
-	public void onRobotDeath(RobotDeathEvent e) {
-		others = getOthers();
-		scanned.remove(e.getName());
-		if (others == 1) {	// Begin the duel!
-			moveState = 6;
-			radarState = 0;
-		}
-		out.println(e.getName()+" died.  "+others+" remain.");
-	}
-
-	/**
-	 * onScannedRobot
-	 * 
-	 * 1. check heat
-	 * 2. calculate shot power based in distance...weaker/faster for further targets
-	 * 3. determine an amount to lead target based on current velocity
-	 * 
-	 * @param ScannedRobotEvent e - event pertaining to robot scanned
-	 */
-	public void onScannedRobot(ScannedRobotEvent e) {
-		//out.println("Scanned a robot.");
-		found = true;
-		enemy = new HashMap<String, Number>();
-		enemy.put("time", getTime());
-		enemy.put("distance", e.getDistance());
-		enemy.put("originalBearing", e.getBearing());
-		enemy.put("absoluteBearingRadians", toRadians(getHeading()) + e.getBearingRadians());
-		enemy.put("velocity", e.getVelocity());
-		enemy.put("heading", e.getHeading());
-		enemy.put("headingRadians", e.getHeadingRadians());
-		enemy.put("energy", e.getEnergy());
-		enemy.put("origX", getX() +  Math.sin(enemy.get("originalBearing").doubleValue()) * enemy.get("distance").doubleValue());
-		enemy.put("origY", getY() +  Math.cos(enemy.get("originalBearing").doubleValue()) * enemy.get("distance").doubleValue());
-		// lower power moves faster and easier to reach distant targets
-		double bullet = 1.0;
-		double energy = getEnergy();
-		if (enemy.get("distance").doubleValue() > 400 || energy < 15) {
-			bullet = 1.0;
-		} else if (enemy.get("distance").doubleValue() > 200) {
-			bullet = 2 < energy ? 2 : energy;
-		} else {
-			bullet = 3 < energy ? 3 : energy;
-		}
-		enemy.put("power", bullet);
-		enemy.put("wallcrawling", enemy.get("velocity").doubleValue() != 0.0 && (enemy.get("heading").doubleValue() == 0.0 || 
-				enemy.get("heading").doubleValue() == 90.0 || enemy.get("heading").doubleValue() == 180.0 ||
-				enemy.get("heading").doubleValue() == 270.0) ? 1 : 0);
-		// add scan to list of scanned robots
-		String name = e.getName();
-		scanned.put(name, enemy);
-
-		// add scan to history of that enemy's scans
-		if (!(history.containsKey(name))) {
-			List<Map<String, Number>> empty = new LinkedList<Map<String, Number>>(); 
-			history.put(name, empty);
-		} else {
-			Map<String, Number> lastScan = history.get(name).get(history.get(name).size()-1);
-			if (enemy.get("energy").doubleValue() != lastScan.get("energy").doubleValue() && Math.random() > 0.3) {
-				moveToggle = 0 - moveToggle;
+		});
+		
+		addCustomEvent(new Condition("sweepComplete") {
+			public boolean test() {
+				return getRadarTurnRemainingRadians() == 0;
 			}
-			enemy.put("prevVelo", lastScan.get("velocity").doubleValue());
-			enemy.put("prevX", lastScan.get("origX").doubleValue());
-			enemy.put("prevY", lastScan.get("origY").doubleValue());
-			enemy.put("prevHeading", lastScan.get("heading").doubleValue());
-		}
-		history.get(name).add(enemy);
-
-		// analyze history for wall-crawling behavior -- easier to hit with simple linear prediction
-		long amtcrawling = history.get(name).stream()
-				.filter(r -> r.get("wallcrawling").intValue() == 1)
-				.count();
-		double percentage = amtcrawling * 100 / history.get(name).size();
-		boolean wallcrawler = percentage > 70;
-		if (wallcrawler) {
-			targetingStrategies.get(0).accept(enemy);
-		} else {
-			targetingStrategies.get(1).accept(enemy);
-		}
-	}
-	
-	public void onBulletHit(BulletHitEvent e) {
-		stats.put("hits", stats.get("hits")+1);
-	}
-	
-	public void onBulletMissed(BulletMissedEvent e) {
-		stats.put("misses", stats.get("misses")+1);
-	}
-	
-	public void onBulletHitBullet(BulletHitBulletEvent e) {
-		stats.put("bullets", stats.get("bullets")+1);
-	}
-	
-	public void onDeath(DeathEvent e) {
-		if (stats.get("shots") != 0 && stats.get("written").intValue() == 0) {
-			out.println("Statistics -- "+stats);
-			out.println("Accuracy: "+stats.get("hits")*100/stats.get("shots"));
-			stats.put("written", 1);
-			statHistory.add(stats);
-
-			int hitstat = statHistory.stream().mapToInt(s -> s.get("hits").intValue()).sum();
-			int shotstat = statHistory.stream().mapToInt(s -> s.get("shots").intValue()).sum();
-			out.println("Battle Shots Fired: "+shotstat);
-			out.println("Battle Hits Scored: "+hitstat);
-			out.println("Battle Accurracy: "+hitstat*100/shotstat);
-		}
-	}
-	
-	public void onRoundEnded(RoundEndedEvent e) {
-		if (stats.get("shots") != 0 && stats.get("written").intValue() == 0) {
-			out.println("Statistics -- "+stats);
-			out.println("Accuracy: "+stats.get("hits")*100/stats.get("shots"));
-			stats.put("written", 1);
-			statHistory.add(stats);
-
-			int hitstat = statHistory.stream().mapToInt(s -> s.get("hits").intValue()).sum();
-			int shotstat = statHistory.stream().mapToInt(s -> s.get("shots").intValue()).sum();
-			out.println("Battle Shots Fired: "+shotstat);
-			out.println("Battle Hits Scored: "+hitstat);
-			out.println("Battle Accurracy: "+hitstat*100/shotstat);
-		}
-	}
-	
-	public void onBattleEnded(BattleEndedEvent e) {
-	}
-	
-	/**
-	 * Stolen directly from TrackFire bot
-	 * 
-	 */
-	public void onWin(WinEvent e) {
-		// Victory dance
-		turnRight(36000);
+		});
 	}
 
-	public void onPaint(Graphics2D g) {
-		double x = getX();
-		double y = getY();
-		//out.println("Painting.");
-		// point to the corners
-		/*if (getVelocity() != 0) {
-			g.setColor(Color.white);
-			g.drawLine((int)x, (int)y, (int)corners[0][0], (int)corners[0][1]);
-			g.drawLine((int)x, (int)y, (int)corners[1][0], (int)corners[1][1]);
-			g.drawLine((int)x, (int)y, (int)corners[2][0], (int)corners[2][1]);
-			g.drawLine((int)x, (int)y, (int)corners[3][0], (int)corners[3][1]);
-		}*/
+	private int initializeMovementStates() {
+		if (movementStates == null) {
+			movementStates = new ArrayList<Consumer<Point2D>>();
+		}
 
-		// 
-		g.setColor(Color.green);
-		scanned.entrySet().stream()
-			.filter(r -> (getTime() - r.getValue().get("time").longValue()) < 5)
-			.forEach(
-					r -> g.drawLine((int)x, 
-								    (int)y, 
-							        ((Integer)r.getValue().get("x")).intValue(), 
-							        ((Integer)r.getValue().get("y")).intValue()));
-	}
-	
-	/**
-	 * linearPrediction: uses weighted linear prediction to predict movement and weight targets
-	 * 
-	 * @param e - ScannedRobotEvent
-	 */
-	private void linearPrediction(Map<String, Number> e) {
-		double x = getX();
-		double y = getY();
-		double robotDistance = e.get("distance").doubleValue();
-		double robotVelocity = e.get("velocity").doubleValue();
-		double bullet = e.get("power").doubleValue();
-		double absoluteBearing = e.get("absoluteBearingRadians").doubleValue();
-		
-		// calculate rough linear prediction targeting
-		double adjustment = Math.asin((robotVelocity * Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing) / Rules.getBulletSpeed(bullet)));
-		// check for walls
-		Point2D targPoint = checkWallCollision(new Point2D.Double(x,y), absoluteBearing + adjustment, robotDistance);
-		double angle = toDegrees(Math.atan2(targPoint.getX()-x, targPoint.getY()-y));
-		enemy.put("bearing", angle);
-		enemy.put("adjustment", adjustment);
-		enemy.put("x", new Integer((int)targPoint.getX()));
-		enemy.put("y", new Integer((int)targPoint.getY()));
-		
-		if (enemy.get("energy").doubleValue() == 0.0) {
-			enemy.put("score", 1000.0);
-		} else {
-			enemy.put("score",  -(adjustment + angle/30 + robotDistance));
-		}
-		//out.println("Added scanned robot: "+scan);
-	}
-	
-	/**
-	 * gaussianDistributionPrediction: linear prediction as above, but adjusted to factor in
-	 * 		random guessing with a gaussian distribution of probability
-	 * @param e
-	 */
-	private void gaussianDistributionPrediction(Map<String, Number> e) {
-		double x = getX();
-		double y = getY();
-		double robotDistance = e.get("distance").doubleValue();
-		double robotVelocity = 8; // e.get("velocity").doubleValue();
-		double angle = 0;
-		double adjustment = 0;
-		Point2D targPoint = new Point2D.Double(e.get("origX").doubleValue(), e.get("origY").doubleValue());
-		
-		if (e.get("energy").doubleValue() != 0.0) {
-			double bullet = e.get("power").doubleValue();
-			double absoluteBearing =  e.get("absoluteBearingRadians").doubleValue();
-			Random guess = new Random(Instant.now().toEpochMilli());
-			// nextGaussian gives results -3 to 3 (three standard deviations) making 0 most likely result,
-			// but robot is fairly unlikely to stand still.  So, divide by 3 to get results from -1 to 1,
-			// offset by, oh, .25 (assumption: robot is going to move, but less that maximum possible),
-			// then flip positive/negative at random to model forward and backward @ relative equality
-			double secondGuess = ((guess.nextGaussian() / 3) + 0.25) * (guess.nextBoolean() ? 1 : -1);
-			
-			// calculate rough linear prediction targeting
-			adjustment = Math.asin((robotVelocity * Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing) / Rules.getBulletSpeed(bullet)));
-			if (Double.isNaN(adjustment)) {
-				out.println("Velocity "+robotVelocity);
-				out.println("Heading(radians) "+e.get("headingRadians"));
-				out.println("Absolute Bearing: "+absoluteBearing);
-				out.println("Time to Target: "+Rules.getBulletSpeed(bullet));
-				out.println("sin(heading-absolutebearing): "+Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing));
-				out.println("All together: "+(robotVelocity * Math.sin(e.get("headingRadians").doubleValue() - absoluteBearing) / Rules.getBulletSpeed(bullet)));
-			}
-			adjustment = adjustment * secondGuess;
-			// check for walls
-			targPoint = checkWallCollision(new Point2D.Double(x,y), absoluteBearing + adjustment, robotDistance);
-		}
-		angle = toDegrees(enemy.get("absoluteBearingRadians").doubleValue());
-		enemy.put("bearing", angle);
-		enemy.put("adjustment", adjustment);
-		enemy.put("x", new Integer((int)targPoint.getX()));
-		enemy.put("y", new Integer((int)targPoint.getY()));
-		
-		
-		if (enemy.get("energy").doubleValue() == 0.0) {
-			enemy.put("score", 1000.0);
-		} else {
-			enemy.put("score",  -(adjustment + angle/30 + robotDistance));
-		}
-	}
-	
-	/**
-	 * smartFire: score targets, determine best target, calculate how much gun, and fire.
-	 * 
-	 */
-	private void smartFire() {
-		// abort if heat is > 0, no energy or no scanned robots yet
-		if (getEnergy() > 0 && getGunHeat() == 0 && scanned.size() > 0) {
-			List<Map<String, Number>> victims = new ArrayList<Map<String, Number>>(scanned.keySet().size());
-			scanned.entrySet().stream()
-				.filter(r -> (getTime() - r.getValue().get("time").longValue()) < 10)
-				.forEach(r -> victims.add(r.getValue()));
-			if (victims.size() > 0) {
-				Map<String, Number> victim = victims.stream()
-					.reduce(identity, (a, b) -> (a.get("score").doubleValue() > b.get("score").doubleValue()) ? a : b);
-				
-				//out.println("plotted bearing: "+victim.get("bearing")+", range: "+victim.get("distance"));
-				turnToHeading(victim.get("bearing").doubleValue(), gun);
-				//out.println("Turning gun to heading: "+gunHeading);
-				
-				// kill
-				fire(victim.get("power").doubleValue());
-				stats.put("shots", stats.get("shots")+1);
-				//out.println("Firing: "+victim);
+		// 0 - rebasing to nearest corner
+		movementStates.add(p -> {
+			if (!inCorner(p)) {
+				destination.setLocation(plotNearestCorner(p));
+				layCourse(p, destination);
 			} else {
-				if (moveState != 6) { moveState = 2; }
+				moveState = 4;
 			}
-		}
-	}
-	
-	private Point2D checkWallCollision(Point2D.Double origin, double bearing, double distance) {
-		double targx = origin.getX() + Math.sin(bearing) * distance;
-		if (targx < 18.0) { 
-			targx = 18.0; 
-		} else if (targx > (getBattleFieldWidth() - 18.0)) {
-			targx = getBattleFieldWidth() - 18.0;
-		}
-		double targy = origin.getY() + Math.cos(bearing) * distance;
-		if (targy < 18.0) { 
-			targy = 18.0; 
-		} else if (targy > (getBattleFieldHeight() - 18.0)) {
-			targy = getBattleFieldHeight() - 18.0;
-		}
-		return new Point2D.Double(targx, targy);
-	}
-	
-	/**
-	 * layCourse: combination method to turn to a heading and move a distance
-	 * 
-	 * @param destination - double[] containing heading and distance
-	 */
-	private void layCourse(double[] destination) {
-		turnToHeading(destination[0], body);
-		ahead(destination[1]);
-	}
-
-	private double[] plotNearestCorner(Point2D.Double p) {
-			return plotNearestCorner(p.getX(), p.getY());
-	}
-	
-	/**
-	 * plotNearestCorner(double, double): calculates nearest corner from passed-in location
-	 * 
-	 * SIDE EFFECT: sets targetCorner array
-	 * 
-	 * @param x
-	 * @param y
-	 * @return double array of polar coordinates for course (angle, distance)
-	 */
-	private double[] plotNearestCorner(double x, double y) {
-		double shortest = 999999;
-		double current;
-		for (int i = 0; i < 4; i++) {
-			current = Math.sqrt((corners[i][0]-x)*(corners[i][0]-x) + (corners[i][1]-y)*(corners[i][1]-y));
-			if (current < shortest) {
-				shortest = current;
-				targetCorner = corners[i];
+		});
+		// 1 - rebasing to next corner
+		movementStates.add(p -> {
+			if (!inCorner(p)) {
+				destination.setLocation(plotNextCorner(p));
+				layCourse(p, destination);
+			} else {
+				moveState = 4;
 			}
-		}
-		return plotCorner(targetCorner[0]-x, targetCorner[1]-y);
-	}
-
-	private double[] plotNextCorner(Point2D.Double p) {
-		return plotNextCorner(p.getX(), p.getY());
-	}
-	
-	/**
-	 * plotNextCorner(double, double): calculates direction and distance of 
-	 * next corner in corners array from the passed-in location
-	 * 
-	 * SIDE EFFECT: sets targetCorner array
-	 * 
-	 * @param x
-	 * @param y
-	 * @return double array of polar coordinates for course (angle, distance)
-	 */
-	private double[] plotNextCorner(double x, double y) {
-		targetCorner = corners[(int)targetCorner[2]];
-		return plotCorner(targetCorner[0]-x, targetCorner[1]-y);
-	}
-	
-	private double[] plotCorner(double x, double y) {
-		double[] plot = {toDegrees(Math.atan2(x, y)), Math.sqrt(x*x + y*y)};
-		return plot;
-	}
-
-	private double[] adjustRadarSweep(Point2D.Double p) {
-		return adjustRadarSweep(p.getX(), p.getY());
-	}
-	
-	private double[] adjustRadarSweep(double x, double y) {
-		double [] bearings = {toDegrees(Math.atan2(corners[(int)targetCorner[2]][0]-x, 
-												   corners[(int)targetCorner[2]][1]-y)), 
-							  toDegrees(Math.atan2(corners[(int)targetCorner[3]][0]-x, 
-									  			   corners[(int)targetCorner[3]][1]-y))};
-		return bearings;
-	}
-	
-	/**
-	 * Constantly turning things right to match new bearings
-	 * @param theta - bearing to match
-	 * @param operator - body part (body, gun, radar) to turn
-	 */
-	private void turnToHeading(double theta, Consumer<Double> operator) {
-		operator.accept(theta);
-	}
-
-	/**
-	 * since this is a basic bot, I can only get bearing, etc., in degrees, 
-	 * but my algorithms all seem to use radians.
-	 * 
-	 *  yay
-	 *  
-	 *  conversion is not exact, but close enough
-	 *  
-	 * @param degrees
-	 * @return double - radian equivalent of the degree measure 
-	 */
-	private double toRadians(double degrees) {
-		return degrees * 0.0174532925;
-	}
-	
-	/**
-	 * since this is a basic bot, I can only set bearing, etc., in degrees,
-	 * but my algorithms all seem to use radians.
-	 * 
-	 * yay
-	 * 
-	 * conversion is not exact, but close enough
-	 * 
-	 * @param radians
-	 * @return double - degree equivalent of the radian measure
-	 */
-	private double toDegrees(double radians) {
-		return radians * 57.2957795;
+		});
+		// 2 - rebasing to previous corner
+		// UNUSED
+		movementStates.add(p -> {
+			if (!inCorner(p)) {
+				destination.setLocation(plotPreviousCorner(p));
+				layCourse(p, destination);
+			} else {
+				moveState = 4;
+			}
+		});
+		// 3 - traveling to selected base corner
+		// UNUSED
+		movementStates.add(p -> {
+			out.println("WOAH. IN UNUSED MOVEMENT CASE 3.");
+		});
+		// 4 - dodging about in the corner
+		movementStates.add(p -> {
+			if (inCorner(p)) {
+				if (getVelocity() >= 0 || Math.random() > .1) {
+					double x = boundries.getMinX() + boundries.getWidth()
+							* Math.random();
+					double y = boundries.getMinY() + boundries.getHeight()
+							* Math.random();
+					destination.setLocation(x, y);
+					layCourse(p, destination);
+				}
+			} else {
+				moveState = 0;
+			}
+		});
+		// 5 - stalking last enemy
+		movementStates.add(p -> {
+			if (enemy != null) {
+				double bearing = enemy.get("originalBearing").doubleValue();
+				if (enemy.get("distance").doubleValue() > 200) {
+					bearing = bearing + PI / 2 - (PI / 8 * moveToggle);
+				} else {
+					bearing = bearing + PI / 2;
+				}
+				turnToHeading(bearing, body);
+				setAhead(150);
+			}
+		});
+		
+		return 0;
 	}
 }
