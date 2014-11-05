@@ -792,8 +792,9 @@ public class Sulker extends AdvancedRobot {
 		// 5 - stalking last enemy
 		movementStates.add(p -> {
 			if (enemy != null) {
-/*				if (getTurnRemainingRadians() == 0 && getDistanceRemaining() == 0) {
-					double bearing = enemy.get("originalBearing").doubleValue();
+				if (getTurnRemainingRadians() == 0 && getDistanceRemaining() == 0) {
+					moveToggle = 0 - moveToggle;
+					double bearing = enemy.get("absoluteBearingRadians").doubleValue();
 					if (enemy.get("distance").doubleValue() > 200) {
 						bearing = bearing + PI/2 - (PI/8 * moveToggle);
 					} else {
@@ -801,12 +802,10 @@ public class Sulker extends AdvancedRobot {
 					}
 					setMaxVelocity(0);
 					turnToHeading(bearing, body);
-					setAhead(150);
+					setAhead(150 * moveToggle);
 				} else if (getTurnRemainingRadians() == 0) {
 					setMaxVelocity(Rules.MAX_VELOCITY);
-				} */
-				destination.setLocation(enemy.get("origX").doubleValue(), enemy.get("origY").doubleValue());
-				layCourse(p, destination);
+				} 
 			}
 			if (radarState != 0) { radarState = 0; }
 		});
