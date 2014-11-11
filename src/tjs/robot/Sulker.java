@@ -3,6 +3,7 @@ package tjs.robot;
 import static java.lang.Math.PI;
 import static java.lang.Math.atan2;
 import static robocode.util.Utils.normalRelativeAngle;
+import static robocode.util.Utils.normalAbsoluteAngle;
 
 import java.awt.Color;
 import java.awt.Graphics2D;
@@ -13,11 +14,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 import robocode.AdvancedRobot;
 import robocode.BattleEndedEvent;
@@ -59,18 +61,19 @@ public class Sulker extends AdvancedRobot {
 	int radarToggle = 1; // allow radar to flip back and forth
 
 	// Maps for handling scanning of enemy bots
-	Map<String, Map<String, Number>> scanned; // contains vital statistics of
+	Map<Integer, Map<String, Number>> scanned; // contains vital statistics of
 												// potential targets
 	Map<String, Number> enemy; // current working potential target
-	Map<String, List<Map<String, Number>>> history = new HashMap<String, List<Map<String, Number>>>();
+	Map<Integer, List<Map<String, Number>>> history = new HashMap<Integer, List<Map<String, Number>>>();
 								// history of scanned targets
 	Map<String, Number> identity; // identity map for parallel stream reduce methods
+	// number of virtual guns
+	int gunArraySize = 31;
 
 	Map<String, Integer> stats;
 	static List<Map<String, Integer>> statHistory = new ArrayList<Map<String, Integer>>();
 
-	// Since I'm always turning something to match a given bearing and all that
-	// varies is what...
+	// Consumers for turning various tank parts to an absolute heading
 	Consumer<Double> gun = bearing -> {
 		setTurnGunRightRadians(normalRelativeAngle(bearing - getGunHeadingRadians()));
 	};
@@ -118,24 +121,58 @@ public class Sulker extends AdvancedRobot {
 	
 	// list of targeting strategies
 	List<Consumer<Map<String, Number>>> targetingStrategies = Arrays.asList(
-	// weighted linear prediction
+			// weighted linear prediction
 			e -> {
 				linearPrediction(e);
-			}, e -> {
+			}, 
+			// gaussian-distribution-modified, weighted linear prediction
+			e -> {
 				gaussianDistributionPrediction(e);
+			},
+			e -> {
+				guessFactorPrediction(e);
 			});
 
 	// List of options for gun ready states
-	List<Consumer<Map<String, Number>>> gunActions = Arrays.asList(g -> {
-		turnToHeading(g.get("bearing").doubleValue(), gun);
-		gunState = 1;
-	}, g -> {
-		setFire(g.get("power").doubleValue());
-		stats.put("shots", stats.get("shots") + 1);
-		gunState = 0;
-	});
+	List<Consumer<Map<String, Number>>> gunActions = Arrays.asList(
+			g -> {
+				turnToHeading(g.get("bearing").doubleValue(), gun);
+				gunState = 1;
+			}, 
+			g -> {
+				setFire(g.get("power").doubleValue());
+				stats.put("shots", stats.get("shots") + 1);
+				gunState = 0;
+			});
+	// current ready gun state
 	int gunState = 0;
-
+	
+	BiFunction<Map<String, Number>, Map<String, Number>, Integer> calculateWaveHit = (wave, scan) -> {
+		Integer gunBearing = null;
+		double startX = wave.get("myX").doubleValue();
+		double startY = wave.get("myY").doubleValue();
+		double enemyX = scan.get("origX").doubleValue();
+		double enemyY = scan.get("origY").doubleValue();
+		double startBearing = wave.get("absoluteBearingRadians").doubleValue();
+		double maxEscapeAngle = wave.get("escapeAngle").doubleValue();
+		int direction = wave.get("direction").intValue();
+		if (wave.get("factor") == null) {
+			double waveDistance = Point2D.distance(startX, startY, enemyX, enemyY);
+			if (waveDistance <= 
+					(scan.get("time").doubleValue() - wave.get("time").doubleValue()) 
+					* wave.get("bulletSpeed").doubleValue()) {
+				double desiredDirection = atan2(enemyX - startX, enemyY - startY);
+				double angleOffset = normalRelativeAngle(desiredDirection - startBearing);
+				double guessFactor = Math.max(-1, Math.min(1,  angleOffset / maxEscapeAngle)) * direction;
+				gunBearing = (int)Math.round((gunArraySize - 1) / 2 * (guessFactor + 1));
+			}
+		} else {
+			gunBearing = wave.get("factor").intValue();
+		}
+		
+		return gunBearing;
+	};
+	
 	public void run() {
 		initialize();
 
@@ -150,10 +187,12 @@ public class Sulker extends AdvancedRobot {
 		}
 	}
 
+	/*
 	private void shoot() {
 		// out.println("Shooting. Strategy: "+targetingState);
 		smartFire();
 	}
+	*/
 
 	private void sweep(Point2D p) {
 		// out.println("Sweeping. Strategy: "+radarState);
@@ -183,7 +222,7 @@ public class Sulker extends AdvancedRobot {
 		switch (cond) {
 			case "sweepComplete" : 
 				sweep(new Point2D.Double(getX(), getY()));
-				shoot();
+				//shoot();
 				break;
 			case "moveComplete" :
 				move(new Point2D.Double(getX(), getY()));
@@ -269,60 +308,84 @@ public class Sulker extends AdvancedRobot {
 	public void onScannedRobot(ScannedRobotEvent e) {
 		// out.println("Scanned a robot.");
 		found = true;
-		enemy = new HashMap<String, Number>();
-		enemy.put("time", getTime());
-		enemy.put("distance", e.getDistance());
-		enemy.put("originalBearing", e.getBearingRadians());
-		enemy.put("absoluteBearingRadians",
-				getHeadingRadians() + e.getBearingRadians());
-		enemy.put("velocity", e.getVelocity());
-		enemy.put("heading", e.getHeadingRadians());
-		enemy.put("headingRadians", e.getHeadingRadians());
-		enemy.put("energy", e.getEnergy());
-		enemy.put("origX",
-				getX() + Math.sin(enemy.get("absoluteBearingRadians").doubleValue())
-						* enemy.get("distance").doubleValue());
-		enemy.put("origY",
-				getY() + Math.cos(enemy.get("absoluteBearingRadians").doubleValue())
-						* enemy.get("distance").doubleValue());
-		// lower power moves faster and easier to reach distant targets
+		double time = getTime();
+		double distance = e.getDistance();
+		double bearing = e.getBearingRadians();
+		double myHeading = getHeadingRadians();
+		double heading = e.getHeadingRadians();
+		double absoluteBearing = bearing + myHeading;
+		double velocity = getVelocity();
+		double myEnergy = getEnergy();
+		double energy = e.getEnergy();
+		double myX = getX();
+		double myY = getY();
+		double origX = myX + Math.sin(absoluteBearing) * distance;
+		double origY = myY + Math.cos(absoluteBearing) * distance;
 		double bullet = 1.0;
-		double energy = getEnergy();
-		if (enemy.get("distance").doubleValue() > 400 || energy < 15) {
+		if (distance > 400 ||  myEnergy < 15) {
 			bullet = 1.0;
-		} else if (enemy.get("distance").doubleValue() > 200) {
-			bullet = 2 < energy ? 2 : energy;
+		} else if (distance > 200) {
+			bullet = 2 < myEnergy ? 2 : myEnergy;
 		} else {
-			bullet = 3 < energy ? 3 : energy;
+			bullet = 3 < myEnergy ? 3 : myEnergy;
 		}
+		int name = e.getName().hashCode();
+		double bulletSpeed = Rules.getBulletSpeed(bullet);
+		double escapeAngle = Math.asin(Rules.MAX_VELOCITY / bulletSpeed);
+		int direction = Math.sin(heading - absoluteBearing) * velocity < 0 ? -1 : 1;
+		Integer factor = null; 
+		int distanceSeg = (int)(Math.floor(distance / 100) / bulletSpeed);
+		int bearingSeg = (int)Math.floor(Math.abs(bearing) / (PI/6));
+		int wWallSeg = Math.min(8, (int)Math.floor(origX/36));
+		int eWallSeg = Math.min(8, (int)Math.floor((boundries.getMaxX()+margin-origX)/36));
+		int sWallSeg = Math.min(8, (int)Math.floor(origY/36));
+		int nWallSeg = Math.min(8, (int)Math.floor((boundries.getMaxY()+margin-origY)/36));
+
+		enemy = new HashMap<String, Number>();
+		enemy.put("time", time);
+		enemy.put("distance", distance);
+		enemy.put("originalBearing", bearing);
+		enemy.put("absoluteBearingRadians", absoluteBearing);
+		enemy.put("velocity", velocity);
+		enemy.put("heading", heading);
+		enemy.put("headingRadians", heading);
+		enemy.put("myHeading", myHeading);
+		enemy.put("energy", energy);
+		enemy.put("myX", myX);
+		enemy.put("myY", myY);
+		enemy.put("origX", origX);
+		enemy.put("origY", origY);
 		enemy.put("power", bullet);
-		enemy.put(
-				"wallcrawling",
-				enemy.get("velocity").doubleValue() != 0.0
-						&& (enemy.get("heading").doubleValue() == 0.0
-								|| enemy.get("heading").doubleValue() == PI / 2
-								|| enemy.get("heading").doubleValue() == PI || enemy
-								.get("heading").doubleValue() == 1.5 * PI) ? 1
-						: 0);
+		enemy.put("name", name);
+		enemy.put("wallcrawling",
+				velocity != 0 && (heading == 0 || heading == PI/2 || heading == PI || heading == 1.5 * PI) ? 1 : 0);
+		enemy.put("bulletSpeed", bulletSpeed);
+		enemy.put("escapeAngle", escapeAngle);
+		enemy.put("direction", direction);
+		enemy.put("factor", factor);
+		enemy.put("distanceSeg", distanceSeg);
+		enemy.put("bearingSeg", bearingSeg);
+		enemy.put("wWallSeg", wWallSeg);
+		enemy.put("eWallSeg", eWallSeg);
+		enemy.put("sWallSeg", sWallSeg);
+		enemy.put("nWallSeg", nWallSeg);
+		
 		// add scan to list of scanned robots
-		String name = e.getName();
 		scanned.put(name, enemy);
 
 		// add scan to history of that enemy's scans
 		if (!(history.containsKey(name))) {
-			List<Map<String, Number>> empty = new LinkedList<Map<String, Number>>();
+			List<Map<String, Number>> empty = new ArrayList<Map<String, Number>>();
 			history.put(name, empty);
 		} else {
-			Map<String, Number> lastScan = history.get(name).get(
-					history.get(name).size() - 1);
-			if (enemy.get("energy").doubleValue() != lastScan.get("energy")
-					.doubleValue() && Math.random() > 0.3) {
+			List<Map<String, Number>> namedHistory =  history.get(name);
+			Map<String, Number> lastScan = namedHistory.get(history.get(name).size() - 1);
+			if (energy != lastScan.get("energy").doubleValue() && Math.random() > 0.3) {
 				moveToggle = 0 - moveToggle;
 			}
-			enemy.put("prevVelo", lastScan.get("velocity").doubleValue());
-			enemy.put("prevX", lastScan.get("origX").doubleValue());
-			enemy.put("prevY", lastScan.get("origY").doubleValue());
-			enemy.put("prevHeading", lastScan.get("heading").doubleValue());
+			
+			namedHistory.stream().filter(m -> m.get("factor") == null)
+				.forEach(m -> { m.put("factor", calculateWaveHit.apply(m, enemy)); });
 		}
 		history.get(name).add(enemy);
 
@@ -334,10 +397,12 @@ public class Sulker extends AdvancedRobot {
 		boolean wallcrawler = percentage > 70;
 		if (wallcrawler) {
 			targetingStrategies.get(0).accept(enemy);
-		} else {
+		}  else if (others > 4) {
 			targetingStrategies.get(1).accept(enemy);
+		} else {
+			targetingStrategies.get(2).accept(enemy);
 		}
-		
+		smartFire();
 		//out.println("Scanned robot: "+enemy);
 	}
 
@@ -374,18 +439,20 @@ public class Sulker extends AdvancedRobot {
 	public void onRoundEnded(RoundEndedEvent e) {
 		if (stats.get("shots") != 0 && stats.get("written").intValue() == 0) {
 			out.println("Statistics -- " + stats);
-			out.println("Accuracy: " + stats.get("hits") * 100
-					/ stats.get("shots"));
+			out.println("Accuracy: " + (double)stats.get("hits") * 100
+					/ (double)stats.get("shots"));
 			stats.put("written", 1);
 			statHistory.add(stats);
-
+			
+			out.println("Number of rounds: "+getTime());
+			
 			int hitstat = statHistory.stream()
 					.mapToInt(s -> s.get("hits").intValue()).sum();
 			int shotstat = statHistory.stream()
 					.mapToInt(s -> s.get("shots").intValue()).sum();
 			out.println("Battle Shots Fired: " + shotstat);
 			out.println("Battle Hits Scored: " + hitstat);
-			out.println("Battle Accurracy: " + hitstat * 100 / shotstat);
+			out.println("Battle Accurracy: " + (double)hitstat * 100 / (double)shotstat);
 		}
 	}
 
@@ -547,7 +614,68 @@ public class Sulker extends AdvancedRobot {
 		if (enemy.get("energy").doubleValue() == 0.0) {
 			enemy.put("score", 1000.0);
 		} else {
-			enemy.put("score", -(adjustment + angle / (PI / 4) + robotDistance));
+			enemy.put("score", -(adjustment / (PI / 4) + robotDistance));
+		}
+	}
+	
+	/**
+	 * guessFactorPrediction: uses an adaptation of the GuessFactor targeting tutorial
+	 * 
+	 * @param enemy
+	 */
+	private void guessFactorPrediction(Map<String, Number> enemy) {
+		List<Map<String, Number>> waves = history.get(enemy.get("name"));
+		Map<Double, Long> angles =  waves.stream()
+										 .sorted((a, b) -> Integer.compare(a.get("time").intValue(), 
+												 						   b.get("time").intValue()))
+										 .filter(w -> w.get("factor") != null &&
+												 	  Math.abs(Math.min(Math.min(w.get("nWallSeg").doubleValue(),
+												 			  					w.get("sWallSeg").doubleValue()),
+												 			  			Math.min(w.get("eWallSeg").doubleValue(),
+												 			  					w.get("wWallSeg").doubleValue())) -
+												 			 Math.min(Math.min(enemy.get("nWallSeg").doubleValue(),
+												 					 			enemy.get("sWallSeg").doubleValue()),
+												 					 Math.min(enemy.get("eWallSeg").doubleValue(),
+												 							 enemy.get("wWallSeg").doubleValue()))) <= 2 &&
+												 	  Math.abs(w.get("distanceSeg").intValue() - 
+												 			   enemy.get("distanceSeg").intValue()) <= 3)
+										 .limit(100)
+										 .collect(Collectors.groupingBy(w -> w.get("factor").doubleValue(), 
+																		Collectors.counting()));
+		if (angles.size() > 0) {
+			double modeOffset = angles.entrySet()
+									  .stream()
+									  .reduce((a,b) -> a.getValue() > b.getValue() ? a : b)
+									  .get()
+									  .getKey();
+			if (angles.get(modeOffset) > 3) {
+				//out.println("Chosen angle offset "+modeOffset*8+" radians with count of "+angles.get(modeOffset));
+				double heading = enemy.get("heading").doubleValue();
+				double absoluteBearing = enemy.get("absoluteBearingRadians").doubleValue();
+				double velocity = enemy.get("velocity").doubleValue();
+				int direction = Math.sin(heading - absoluteBearing) * velocity < 0 ? -1 : 1;
+				double escapeAngle = enemy.get("escapeAngle").doubleValue();
+				double guessFactor = (double)(modeOffset - (gunArraySize - 1) / 2) / ((gunArraySize - 1) / 2);
+
+				// adjust for my movment...assume one turn
+				double myVelocity = getVelocity();
+				if (myVelocity != 0) {
+					double myHeading = normalAbsoluteAngle(getHeadingRadians() + getTurnRemainingRadians());
+					double nextX = enemy.get("myX").doubleValue() + Math.sin(myHeading) * myVelocity;
+					double nextY = enemy.get("myY").doubleValue() + Math.cos(myHeading) * myVelocity;
+					double newAbsoluteBearing = atan2(enemy.get("origX").doubleValue() - nextX,
+													  enemy.get("origY").doubleValue() - nextY);
+					enemy.put("bearing", newAbsoluteBearing);
+				} else {
+					enemy.put("bearing", enemy.get("absoluteBearingRadians").doubleValue());					
+				}
+				enemy.put("adjustment", direction * guessFactor * escapeAngle);
+				if (enemy.get("energy").doubleValue() == 0.0) {
+					enemy.put("score", 1000.0);
+				} else {
+					enemy.put("score", -(modeOffset / (PI / 4) + enemy.get("distance").doubleValue()));
+				}
+			}
 		}
 	}
 
@@ -558,14 +686,13 @@ public class Sulker extends AdvancedRobot {
 	 */
 	private void smartFire() {
 		// abort if heat is > 0, no energy or no scanned robots yet
-		if (getEnergy() > 0 && getGunHeat() == 0 && scanned.size() > 0
-				&& getGunTurnRemaining() == 0) {
+		if (getEnergy() > 0 && scanned.size() > 0 && getGunHeat() == 0 && getGunTurnRemaining() == 0) {
 			List<Map<String, Number>> victims = new ArrayList<Map<String, Number>>(
 					scanned.keySet().size());
 			scanned.entrySet()
 					.stream()
 					.filter(r -> (getTime() - r.getValue().get("time")
-							.longValue()) < 10)
+							.longValue()) < 10 && r.getValue().get("score") != null)
 					.forEach(r -> victims.add(r.getValue()));
 			if (victims.size() > 0) {
 				Map<String, Number> victim = victims.stream().reduce(
@@ -707,7 +834,7 @@ public class Sulker extends AdvancedRobot {
 		// Save # of other bots
 		others = getOthers();
 		// initialize map of potential targets
-		scanned = new HashMap<String, Map<String, Number>>(others);
+		scanned = new HashMap<Integer, Map<String, Number>>(others);
 		// initialize "blank" identity map
 		identity = new HashMap<String, Number>(1);
 		identity.put("score", new Double(-50000.0));
@@ -822,4 +949,5 @@ public class Sulker extends AdvancedRobot {
 		
 		return 0;
 	}
+
 }
