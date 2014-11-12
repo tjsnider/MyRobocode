@@ -2,8 +2,8 @@ package tjs.robot;
 
 import static java.lang.Math.PI;
 import static java.lang.Math.atan2;
-import static robocode.util.Utils.normalRelativeAngle;
 import static robocode.util.Utils.normalAbsoluteAngle;
+import static robocode.util.Utils.normalRelativeAngle;
 
 import java.awt.Color;
 import java.awt.Graphics2D;
@@ -30,7 +30,6 @@ import robocode.Condition;
 import robocode.CustomEvent;
 import robocode.DeathEvent;
 import robocode.HitRobotEvent;
-import robocode.HitWallEvent;
 import robocode.RobotDeathEvent;
 import robocode.RoundEndedEvent;
 import robocode.Rules;
@@ -55,7 +54,6 @@ public class Sulker extends AdvancedRobot {
 	double minY = margin;
 	double rectHeight;
 	double rectWidth;
-	private boolean found;
 	int others; // Number of other robots in the game
 	int moveToggle = 1; // allow movement direction to flip back and forth
 	int radarToggle = 1; // allow radar to flip back and forth
@@ -68,7 +66,7 @@ public class Sulker extends AdvancedRobot {
 								// history of scanned targets
 	Map<String, Number> identity; // identity map for parallel stream reduce methods
 	// number of virtual guns
-	int gunArraySize = 31;
+	int gunArraySize = 65;
 
 	Map<String, Integer> stats;
 	static List<Map<String, Integer>> statHistory = new ArrayList<Map<String, Integer>>();
@@ -92,11 +90,7 @@ public class Sulker extends AdvancedRobot {
 	// list of radar sweep strategies
 	List<Consumer<Point2D>> radarStrategies = Arrays.asList(
 			p -> {
-				if (found) {
-					found = false;
-					radarToggle = 0 - radarToggle;
-				}
-				turnRadarRight(45 * radarToggle);
+				turnRadarRight(Double.POSITIVE_INFINITY);
 			},
 			p -> {
 				Point2D next = plotNextCorner(p);
@@ -141,6 +135,7 @@ public class Sulker extends AdvancedRobot {
 			}, 
 			g -> {
 				setFire(g.get("power").doubleValue());
+				g.put("fired", 1);
 				stats.put("shots", stats.get("shots") + 1);
 				gunState = 0;
 			});
@@ -221,15 +216,21 @@ public class Sulker extends AdvancedRobot {
 		
 		switch (cond) {
 			case "sweepComplete" : 
-				sweep(new Point2D.Double(getX(), getY()));
+				if (radarState != 0) {
+					sweep(new Point2D.Double(getX(), getY()));
+				}
 				//shoot();
 				break;
 			case "moveComplete" :
-				move(new Point2D.Double(getX(), getY()));
+				if (moveState != 5) {
+					move(new Point2D.Double(getX(), getY()));
+				}
 				break;
 			case "turnComplete" :
 				setMaxVelocity(Rules.MAX_VELOCITY);
-				move(new Point2D.Double(getX(), getY()));
+				if (moveState != 5) {
+					move(new Point2D.Double(getX(), getY()));
+				}
 				break;
 		}
 	}
@@ -241,7 +242,7 @@ public class Sulker extends AdvancedRobot {
 	 * 
 	 */
 	public void onStatus(StatusEvent e) {
-		if (boundries != null) {
+		if (boundries != null && moveState != 5) {
 			double heading = getHeadingRadians();
 			double velocity = Rules.MAX_VELOCITY;
 			double xo = getX();
@@ -274,14 +275,6 @@ public class Sulker extends AdvancedRobot {
 		recenter(new Point2D.Double(getX(), getY()));
 	}
 
-	public void onHitWall(HitWallEvent e) {
-/*		// plot a course from the center out to this point
-		destination.setLocation(boundries.getCenterX(), boundries.getCenterY());
-		Point2D here = new Point2D.Double(getX(), getY());
-		turnToHeading(atan2(here.getX() - destination.getX(), here.getY() - destination.getY()), body);
-		setBack(destination.distance(here));
-*/	}
-
 	/**
 	 * onRobotDeath: update other robot count variable for strategic adjustments
 	 */
@@ -307,14 +300,13 @@ public class Sulker extends AdvancedRobot {
 	 */
 	public void onScannedRobot(ScannedRobotEvent e) {
 		// out.println("Scanned a robot.");
-		found = true;
 		double time = getTime();
 		double distance = e.getDistance();
 		double bearing = e.getBearingRadians();
 		double myHeading = getHeadingRadians();
 		double heading = e.getHeadingRadians();
 		double absoluteBearing = bearing + myHeading;
-		double velocity = getVelocity();
+		double velocity = e.getVelocity();
 		double myEnergy = getEnergy();
 		double energy = e.getEnergy();
 		double myX = getX();
@@ -369,6 +361,7 @@ public class Sulker extends AdvancedRobot {
 		enemy.put("eWallSeg", eWallSeg);
 		enemy.put("sWallSeg", sWallSeg);
 		enemy.put("nWallSeg", nWallSeg);
+		enemy.put("fired", 0);
 		
 		// add scan to list of scanned robots
 		scanned.put(name, enemy);
@@ -379,10 +372,6 @@ public class Sulker extends AdvancedRobot {
 			history.put(name, empty);
 		} else {
 			List<Map<String, Number>> namedHistory =  history.get(name);
-			Map<String, Number> lastScan = namedHistory.get(history.get(name).size() - 1);
-			if (energy != lastScan.get("energy").doubleValue() && Math.random() > 0.3) {
-				moveToggle = 0 - moveToggle;
-			}
 			
 			namedHistory.stream().filter(m -> m.get("factor") == null)
 				.forEach(m -> { m.put("factor", calculateWaveHit.apply(m, enemy)); });
@@ -403,6 +392,12 @@ public class Sulker extends AdvancedRobot {
 			targetingStrategies.get(2).accept(enemy);
 		}
 		smartFire();
+		if (moveState == 5) {
+			move(new Point2D.Double(getX(), getY()));
+		}
+		if (radarState == 0) {
+			setTurnRadarRightRadians(normalRelativeAngle(absoluteBearing - getRadarHeadingRadians()) * 2);
+		}
 		//out.println("Scanned robot: "+enemy);
 	}
 
@@ -624,32 +619,31 @@ public class Sulker extends AdvancedRobot {
 	 * @param enemy
 	 */
 	private void guessFactorPrediction(Map<String, Number> enemy) {
+		int hitThreshold = 3;
 		List<Map<String, Number>> waves = history.get(enemy.get("name"));
 		Map<Double, Long> angles =  waves.stream()
-										 .sorted((a, b) -> Integer.compare(a.get("time").intValue(), 
-												 						   b.get("time").intValue()))
-										 .filter(w -> w.get("factor") != null &&
-												 	  Math.abs(Math.min(Math.min(w.get("nWallSeg").doubleValue(),
-												 			  					w.get("sWallSeg").doubleValue()),
-												 			  			Math.min(w.get("eWallSeg").doubleValue(),
-												 			  					w.get("wWallSeg").doubleValue())) -
-												 			 Math.min(Math.min(enemy.get("nWallSeg").doubleValue(),
-												 					 			enemy.get("sWallSeg").doubleValue()),
-												 					 Math.min(enemy.get("eWallSeg").doubleValue(),
-												 							 enemy.get("wWallSeg").doubleValue()))) <= 2 &&
-												 	  Math.abs(w.get("distanceSeg").intValue() - 
-												 			   enemy.get("distanceSeg").intValue()) <= 3)
-										 .limit(100)
-										 .collect(Collectors.groupingBy(w -> w.get("factor").doubleValue(), 
-																		Collectors.counting()));
+				//.sorted((a, b) -> Integer.compare(a.get("time").intValue() + a.get("fired").intValue() * 10000, 
+				//	   						   b.get("time").intValue() + b.get("fired").intValue() * 10000))
+				.filter(w -> w.get("factor") != null &&
+					 	  Math.abs(Math.min(Math.min(w.get("nWallSeg").doubleValue(), w.get("sWallSeg").doubleValue()),
+					 			  			Math.min(w.get("eWallSeg").doubleValue(), w.get("wWallSeg").doubleValue())) -
+					 			 Math.min(Math.min(enemy.get("nWallSeg").doubleValue(), enemy.get("sWallSeg").doubleValue()),
+					 					 Math.min(enemy.get("eWallSeg").doubleValue(),
+					 							 enemy.get("wWallSeg").doubleValue()))) <= 2 &&
+					 	  Math.abs(w.get("distanceSeg").intValue() - enemy.get("distanceSeg").intValue()) <= 3 &&
+					 	  w.get("direction").intValue() == enemy.get("direction").intValue() &&
+					 	  w.get("velocity").doubleValue() == enemy.get("velocity").doubleValue())
+				//.limit(gunArraySize * (hitThreshold + 1))
+				.collect(Collectors.groupingBy(w -> w.get("factor").doubleValue(), 
+											Collectors.counting()));
 		if (angles.size() > 0) {
 			double modeOffset = angles.entrySet()
 									  .stream()
 									  .reduce((a,b) -> a.getValue() > b.getValue() ? a : b)
 									  .get()
 									  .getKey();
-			if (angles.get(modeOffset) > 3) {
-				//out.println("Chosen angle offset "+modeOffset*8+" radians with count of "+angles.get(modeOffset));
+			if (angles.get(modeOffset) > hitThreshold) {
+				//out.println("Chosen angle offset "+modeOffset+" radians with count of "+angles.get(modeOffset));
 				double heading = enemy.get("heading").doubleValue();
 				double absoluteBearing = enemy.get("absoluteBearingRadians").doubleValue();
 				double velocity = enemy.get("velocity").doubleValue();
@@ -810,8 +804,10 @@ public class Sulker extends AdvancedRobot {
 	}
 
 	private void initialize() {
-		rectHeight = getBattleFieldHeight() - (2 * margin);
-		rectWidth = getBattleFieldWidth() - (2 * margin);
+		double battleFieldHeight = getBattleFieldHeight();
+		double battleFieldWidth = getBattleFieldWidth();
+		rectHeight = battleFieldHeight - (2 * margin);
+		rectWidth = battleFieldWidth - (2 * margin);
 		boundries = new Rectangle2D.Double(minX, minY, rectWidth, rectHeight);
 		destination = new Point2D.Double(minX, minY);
 
@@ -833,6 +829,8 @@ public class Sulker extends AdvancedRobot {
 
 		// Save # of other bots
 		others = getOthers();
+		if (others == 1) { radarState = 0; }
+		
 		// initialize map of potential targets
 		scanned = new HashMap<Integer, Map<String, Number>>(others);
 		// initialize "blank" identity map
@@ -918,21 +916,39 @@ public class Sulker extends AdvancedRobot {
 		});
 		// 5 - stalking last enemy
 		movementStates.add(p -> {
-			if (enemy != null) {
-				if (getTurnRemainingRadians() == 0 && getDistanceRemaining() == 0) {
-					moveToggle = 0 - moveToggle;
-					double bearing = enemy.get("absoluteBearingRadians").doubleValue();
-					if (enemy.get("distance").doubleValue() > 200) {
-						bearing = bearing + PI/2 - (PI/8 * moveToggle);
-					} else {
-						bearing = bearing + PI/2;
-					}
-					setMaxVelocity(0);
-					turnToHeading(bearing, body);
-					setAhead(150 * moveToggle);
-				} else if (getTurnRemainingRadians() == 0) {
-					setMaxVelocity(Rules.MAX_VELOCITY);
-				} 
+			if (!boundries.contains(p)) {
+				layCourse(p, new Point2D.Double(boundries.getCenterX(), boundries.getCenterY()));
+			} else if (enemy != null && enemy.get("time").doubleValue() > getTime() - 10) {
+				final double WALL_MARGIN = 100;
+				Rectangle2D fieldRectangle = new Rectangle2D.Double(WALL_MARGIN, WALL_MARGIN,
+						getBattleFieldWidth() - WALL_MARGIN * 2, getBattleFieldHeight() - WALL_MARGIN * 2);
+				double direction = 0.4 * moveToggle;
+				double enemyAbsoluteBearing = enemy.get("absoluteBearingRadians").doubleValue();
+				double enemyDistance = enemy.get("distance").doubleValue();
+				Point2D enemyLocation = new Point2D.Double(enemy.get("origX").doubleValue(),
+														   enemy.get("origY").doubleValue());
+				Point2D robotDestination;
+				double tries = 0;
+				double length = enemyDistance * (1.2 - tries / 100.0);
+				double newX = enemyLocation.getX() + Math.sin(enemyAbsoluteBearing + PI + direction) * length;
+				double newY = enemyLocation.getY() + Math.cos(enemyAbsoluteBearing + PI + direction) * length;
+				while (!fieldRectangle.contains(robotDestination = new Point2D.Double(newX, newY)) && tries < 125) {
+					tries++;
+					length = enemyDistance * (1.2 - tries / 100.0);
+					newX = enemyLocation.getX() + Math.sin(enemyAbsoluteBearing + PI + direction) * length;
+					newY = enemyLocation.getY() + Math.cos(enemyAbsoluteBearing + PI + direction) * length;
+				}
+				if ((Math.random() < (11 / 0.421075) / enemyDistance || tries > (enemyDistance / 11 / 0.699484))) {
+					moveToggle = -moveToggle;
+				}
+				// Jamougha's cool way
+				destination = robotDestination;
+				double angle = atan2(robotDestination.getX() - p.getX(), 
+						robotDestination.getY() - p.getY()) - enemy.get("myHeading").doubleValue();
+				setAhead(Math.cos(angle) * 100);
+				setTurnRightRadians(Math.tan(angle));
+			} else {
+				moveState = 6;
 			}
 			if (radarState != 0) { radarState = 0; }
 		});
