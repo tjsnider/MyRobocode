@@ -13,6 +13,7 @@ import java.awt.geom.RoundRectangle2D;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -85,33 +86,12 @@ public class Sulker extends AdvancedRobot {
 	// list of movement states utilized by move() function
 	List<Consumer<Point2D>> movementStates;
 	// current movement strategy
-	int moveState = initializeMovementStates();
+	int moveState;
 	
-	// list of radar sweep strategies
-	List<Consumer<Point2D>> radarStrategies = Arrays.asList(
-			p -> {
-				turnRadarRight(Double.POSITIVE_INFINITY);
-			},
-			p -> {
-				Point2D next = plotNextCorner(p);
-				turnToHeading(atan2(next.getX() - p.getX(), next.getY() - p.getY()), radar);
-				radarState = 2;
-			},
-			p -> {
-				Point2D prev = plotPreviousCorner(p);
-				turnToHeading(atan2(prev.getX() - p.getX(), prev.getY() - p.getY()), radar);
-				radarState = 1;
-			},
-			p -> {
-				turnToHeading(enemy.get("originalBearing").doubleValue() + PI/2, radar);
-				radarState = 4;
-			},
-			p -> {
-				turnToHeading(enemy.get("originalBearing").doubleValue() - PI/2, radar);
-				radarState = 3;
-			});
+	// list of radar sweep states
+	List<Consumer<Point2D>> radarStates;
 	// current radar strategy
-	int radarState = 1;
+	int radarState;
 	
 	// list of targeting strategies
 	List<Consumer<Map<String, Number>>> targetingStrategies = Arrays.asList(
@@ -191,7 +171,7 @@ public class Sulker extends AdvancedRobot {
 
 	private void sweep(Point2D p) {
 		// out.println("Sweeping. Strategy: "+radarState);
-		radarStrategies.get(radarState).accept(p);
+		radarStates.get(radarState).accept(p);
 	}
 
 	private void move(Point2D p) {
@@ -216,9 +196,7 @@ public class Sulker extends AdvancedRobot {
 		
 		switch (cond) {
 			case "sweepComplete" : 
-				if (radarState != 0) {
-					sweep(new Point2D.Double(getX(), getY()));
-				}
+				sweep(new Point2D.Double(getX(), getY()));
 				//shoot();
 				break;
 			case "moveComplete" :
@@ -829,7 +807,6 @@ public class Sulker extends AdvancedRobot {
 
 		// Save # of other bots
 		others = getOthers();
-		if (others == 1) { radarState = 0; }
 		
 		// initialize map of potential targets
 		scanned = new HashMap<Integer, Map<String, Number>>(others);
@@ -841,6 +818,10 @@ public class Sulker extends AdvancedRobot {
 		setAdjustGunForRobotTurn(true);
 		// decouple radar from gun
 		setAdjustRadarForGunTurn(true);
+
+		// initialize movement and radar states
+		radarState = intializeRadarStates();
+		moveState = initializeMovementStates();
 		
 		addCustomEvent(new Condition("moveComplete") { 
 			public boolean test() { 
@@ -859,12 +840,39 @@ public class Sulker extends AdvancedRobot {
 				return getRadarTurnRemainingRadians() == 0;
 			}
 		});
+
 	}
 
+	private int intializeRadarStates() {
+		if (radarStates == null) { radarStates = new ArrayList<>(); }
+		
+		radarStates.add(p -> {
+			setTurnRadarRightRadians(Double.POSITIVE_INFINITY);
+		});
+		radarStates.add(p -> {
+			Point2D next = plotNextCorner(p);
+			turnToHeading(atan2(next.getX() - p.getX(), next.getY() - p.getY()), radar);
+			radarState = 2;
+		});
+		radarStates.add(p -> {
+			Point2D prev = plotPreviousCorner(p);
+			turnToHeading(atan2(prev.getX() - p.getX(), prev.getY() - p.getY()), radar);
+			radarState = 1;
+		});
+		radarStates.add(p -> {
+			turnToHeading(enemy.get("originalBearing").doubleValue() + PI/2, radar);
+			radarState = 4;
+		});
+		radarStates.add(p -> {
+			turnToHeading(enemy.get("originalBearing").doubleValue() - PI/2, radar);
+			radarState = 3;
+		});
+
+		return (others == 1) ? 0 : 1;
+	}
+	
 	private int initializeMovementStates() {
-		if (movementStates == null) {
-			movementStates = new ArrayList<Consumer<Point2D>>();
-		}
+		if (movementStates == null) { movementStates = new ArrayList<>(); }
 
 		// 0 - rebasing to nearest corner
 		movementStates.add(p -> {
@@ -963,7 +971,7 @@ public class Sulker extends AdvancedRobot {
 			}
 		});
 		
-		return 0;
+		return others == 1 ? 5 : 0;
 	}
 
 }
